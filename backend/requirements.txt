@@ -1,0 +1,5 @@
+# 精确锁版本，保证评审和 CI 跑出同样的结果
+fastapi==0.162.5
+uvicorn[standard]==0.54.0
+# UploadFile / multipart 表单依赖，缺了它 /receipts/parse 会直接报错
+python-multipart==0.0.33
