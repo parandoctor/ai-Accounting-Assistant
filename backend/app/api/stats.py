@@ -16,8 +16,8 @@ router = APIRouter(prefix="/stats", tags=["统计"])
     response_model=CategoryStatsResponse,
     summary="按类别统计支出",
     description=(
-        "对应题目 MVP 第 2 项「按类别、按时间维度统计」。\n\n"
-        "注意金额返回的是 `total_cents`（分），前端展示时除以 100。"
+        "按类别与时间范围统计支出。\n\n"
+        "金额字段为 total_cents，单位为分；items 按金额从高到低排序。"
     ),
     responses={
         200: {
@@ -39,6 +39,7 @@ router = APIRouter(prefix="/stats", tags=["统计"])
     },
 )
 def category_stats(
+    # from 为 Python 关键字，对外参数名仍为 from。
     date_from: datetime | None = Query(None, alias="from", description="起始时间（含）"),
     date_to: datetime | None = Query(None, alias="to", description="结束时间（含）"),
 ) -> CategoryStatsResponse:
@@ -58,7 +59,7 @@ def category_stats(
                 category=txs[0].category,
                 total_cents=subtotal,
                 count=len(txs),
-                # total 为 0 时避免除零
+                # total_cents 为 0 时避免除零。
                 ratio=round(subtotal / total_cents, 4) if total_cents else 0.0,
             )
         )

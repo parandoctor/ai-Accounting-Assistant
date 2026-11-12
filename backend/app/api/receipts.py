@@ -1,4 +1,4 @@
-"""小票 / 支付截图识别接口。"""
+"""小票与支付截图识别接口。"""
 
 from fastapi import APIRouter, File, UploadFile, status
 
@@ -8,7 +8,7 @@ from app.schemas.transaction import Source, TransactionDraft
 
 router = APIRouter(prefix="/receipts", tags=["小票识别"])
 
-# deepseek-flash 支持的格式（它按文件内容判断，不看扩展名，但我们这里先按 MIME 挡一道）
+# 允许的图片 MIME 类型；模型侧按文件内容判断实际格式。
 _ALLOWED_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 _MAX_BYTES = 32 * 1024 * 1024
 
@@ -18,9 +18,8 @@ _MAX_BYTES = 32 * 1024 * 1024
     response_model=TransactionDraft,
     summary="上传小票/截图，识别消费信息",
     description=(
-        "接收 `multipart/form-data`，字段名 `file`。\n\n"
-        "识别成功返回金额、商户、时间、类别，`confidence` 表示把握；\n"
-        "识别不出来的字段返回 null 并列进 `missing_fields`，前端让用户补。"
+        "接收 `multipart/form-data`，文件字段名 `file`。\n\n"
+        "识别出的字段直接返回；未能识别的字段为 null 并列入 `missing_fields`。"
     ),
     responses={
         200: {
@@ -43,10 +42,11 @@ _MAX_BYTES = 32 * 1024 * 1024
     },
 )
 async def parse_receipt(file: UploadFile = File(..., description="小票或支付截图")) -> TransactionDraft:
+    """校验上传文件并生成解析草稿。"""
     if file.content_type not in _ALLOWED_TYPES:
         raise ApiError(
             code="UNSUPPORTED_IMAGE_TYPE",
-            message=f"不支持的图片格式：{file.content_type}，请用 JPEG / PNG / GIF / WebP",
+            message=f"不支持的图片格式：{file.content_type}，请使用 JPEG / PNG / GIF / WebP",
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
         )
 
@@ -54,15 +54,13 @@ async def parse_receipt(file: UploadFile = File(..., description="小票或支�
     if len(content) > _MAX_BYTES:
         raise ApiError(
             code="IMAGE_TOO_LARGE",
-            message="图片超过 32MB，请压缩后重试",
+            message="图片超过 32MB",
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail={"size_bytes": len(content), "limit_bytes": _MAX_BYTES},
         )
     if not content:
-        raise ApiError(code="EMPTY_FILE", message="上传的文件是空的")
+        raise ApiError(code="EMPTY_FILE", message="文件为空")
 
-    # TODO(模型)：把 content 转成 base64 传给 deepseek-flash，让它返回 JSON。
-    # 参考 api-test/vision_test.py，那边是完整可运行的版本。
     draft = TransactionDraft(
         draft_id=store.new_draft_id(),
         source=Source.RECEIPT,

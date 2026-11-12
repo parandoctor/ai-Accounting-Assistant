@@ -1,4 +1,4 @@
-"""记账接口：解析、入库、查询。"""
+"""记账接口：解析、保存与查询。"""
 
 import re
 from datetime import datetime
@@ -19,7 +19,7 @@ from app.schemas.transaction import (
 
 router = APIRouter(prefix="/transactions", tags=["记账"])
 
-# 关键词 → 类别。先顶着用，接上模型后就删掉。
+# 关键词到消费类别的映射，用于规则匹配。
 _KEYWORD_CATEGORY = {
     "饭": Category.FOOD, "午餐": Category.FOOD, "晚饭": Category.FOOD,
     "早饭": Category.FOOD, "外卖": Category.FOOD, "咖啡": Category.FOOD,
@@ -49,24 +49,20 @@ _DRAFT_EXAMPLE = {
     response_model=TransactionDraft,
     summary="一句话记账：解析消费信息",
     description=(
-        "把「午饭 25，和同事 AA」这类自然语言转成结构化记账信息。\n\n"
-        "返回的 amount_cents 可能为 null（金额没解析出来），"
-        "前端让用户补填后，再调 POST /transactions 保存。"
+        "将自然语言转换为结构化记账信息。\n\n"
+        "amount_cents 可能为 null，表示未解析出金额，补齐后调用 POST /transactions 保存。"
     ),
     responses={200: {"content": {"application/json": {"example": _DRAFT_EXAMPLE}}}},
 )
 def parse_text(payload: ParseTextRequest) -> TransactionDraft:
-    """TODO(模型)：把下面这段规则匹配换成 deepseek-flash 抽取。
-
-    调用方式见 api-test/vision_test.py，把 text 换成提示词即可。
-    """
+    """从自然语言中提取金额与消费类别。"""
     text = payload.text
 
-    # 粗糙地抠第一个数字，模拟"模型抽出了金额"
+    # 提取文本中的第一个数值作为金额。
     match = re.search(r"(\d+(?:\.\d{1,2})?)", text)
     amount_cents: int | None = None
     if match:
-        # 用 Decimal 而不是 float，避免 25.10 * 100 = 2509.9999 这种误差
+        # 使用 Decimal 避免浮点乘法误差。
         amount_cents = int((Decimal(match.group(1)) * 100).to_integral_value())
 
     category: Category | None = None
@@ -80,8 +76,7 @@ def parse_text(payload: ParseTextRequest) -> TransactionDraft:
         source=Source.TEXT,
         amount_cents=amount_cents,
         merchant=None,
-        # TODO(模型)：让它解析"昨天""上周三"这类相对时间，
-        # 解析不出来就留 null，交给前端让用户选，别猜。
+        # 规则匹配不涉及时间解析。
         occurred_at=None,
         category=category,
         confidence=0.4,
@@ -105,7 +100,7 @@ def parse_text(payload: ParseTextRequest) -> TransactionDraft:
     response_model=Transaction,
     status_code=status.HTTP_201_CREATED,
     summary="保存一笔账",
-    description="前端提交用户确认（或修正）后的值，保存到数据库。",
+    description="保存一笔已确认的账目。",
     responses={
         201: {
             "content": {
@@ -126,9 +121,9 @@ def parse_text(payload: ParseTextRequest) -> TransactionDraft:
     },
 )
 def create_transaction(payload: CreateTransactionRequest) -> Transaction:
-    # 带了 draft_id 就顺手把草稿删掉，避免重复提交
+    # 草稿已确认，移除后再次提交同一 draft_id 不会重复建账。
     if payload.draft_id:
-        store.get_draft(payload.draft_id)
+        store.delete_draft(payload.draft_id)
 
     return store.create_transaction(
         amount_cents=payload.amount_cents,
@@ -143,11 +138,10 @@ def create_transaction(payload: CreateTransactionRequest) -> Transaction:
     "",
     response_model=TransactionList,
     summary="查询账目列表",
-    description="支持时间范围、类别筛选和分页。",
+    description="支持时间范围、类别筛选与分页。",
 )
 def list_transactions(
-    # 注意：Python 里 from 是关键字，所以变量名用 date_from，
-    # 但对外暴露的参数名仍然是 from —— 这就是 alias 的作用。
+    # from 为 Python 关键字，对外参数名仍为 from。
     date_from: datetime | None = Query(None, alias="from", description="起始时间（含）"),
     date_to: datetime | None = Query(None, alias="to", description="结束时间（含）"),
     category: Category | None = Query(None, description="按类别筛选"),

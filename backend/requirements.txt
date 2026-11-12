@@ -1,4 +1,4 @@
-# 精确锁版本，保证评审和 CI 跑出同样的结果
+# 精确锁定版本，保证构建结果可复现。
 fastapi==0.162.5
 uvicorn[standard]==0.54.0
 # UploadFile / multipart 表单依赖，缺了它 /receipts/parse 会直接报错

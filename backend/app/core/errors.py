@@ -1,10 +1,10 @@
-"""统一错误响应。
+"""统一错误响应结构。
 
-前端和测试只需要认一个结构：
+所有非 2xx 响应返回同一格式：
 
-    {"code": "AMOUNT_MISSING", "message": "金额识别失败，请手动填写", "detail": {}}
+    {"code": "AMOUNT_MISSING", "message": "金额识别失败", "detail": {}}
 
-code 是给程序判断的（前端可以按 code 做不同 UI），message 是给人看的。
+code 供程序分支判断，message 供展示。
 """
 
 from fastapi import FastAPI, Request, status
@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 
 class ErrorResponse(BaseModel):
-    """所有非 2xx 响应的结构。"""
+    """非 2xx 响应的响应体。"""
 
     code: str
     message: str
@@ -22,7 +22,7 @@ class ErrorResponse(BaseModel):
 
 
 class ApiError(Exception):
-    """业务异常。在路由里 raise 它，会被下面的 handler 转成统一结构。"""
+    """业务异常，由已注册的异常处理器转换为 ErrorResponse。"""
 
     def __init__(
         self,
@@ -39,7 +39,7 @@ class ApiError(Exception):
 
 
 def register_error_handlers(app: FastAPI) -> None:
-    """在 main.py 里调用一次，把三类异常都收敛成同一个 JSON 结构。"""
+    """注册异常处理器，将业务异常与参数校验失败统一转换为 ErrorResponse。"""
 
     @app.exception_handler(ApiError)
     async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
@@ -48,7 +48,7 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
-        # 参数校验失败（缺字段、类型不对）也走同一个结构，前端不用写两套逻辑
+        # 参数校验失败同样返回统一结构。
         body = ErrorResponse(
             code="INVALID_REQUEST",
             message="请求参数不合法",
