@@ -91,9 +91,16 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 ```powershell
 cd frontend
-uv sync
-uv run streamlit run app.py
+uv venv
+uv pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m streamlit run app.py
 ```
+
+注意 `frontend/` 只有 `requirements.txt`、没有 `pyproject.toml`，所以不能用 `uv sync`；
+也不要写 `uv run streamlit`：`uv run` 会向上找到仓库根目录的 `pyproject.toml` 并复用根目录的 `.venv`，
+那里没装 streamlit，会报 `Failed to spawn: streamlit`。
+
+前端默认请求 `http://127.0.0.1:8000`，可用环境变量 `API_URL` 覆盖（例如后端换了端口时）。
 
 ## 待开发领域
 
