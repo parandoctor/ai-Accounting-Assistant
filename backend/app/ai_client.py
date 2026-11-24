@@ -1,16 +1,12 @@
-"""大模型调用入口：Dify 优先，OpenAI 兼容接口作为备选。
+"""模型调用：OpenAI 兼容接口与 Dify 两种 provider，外加模型输出的字段清洗。
 
-对外暴露两个函数：
-- extract_json()：给任务名、系统提示和用户输入，返回模型输出的 dict；
-- chat()：给系统提示和历史消息，返回助手的回复正文。
-字段校验和兜底在调用方（text_extract / receipt_ocr / query_extract / agent）处理。
+- 传输层：统一超时、重试与错误归类，调用方只需要捕获 AiUnavailable；
+- OpenAI 兼容接口：文本抽取、多轮对话与图片识别都走 /chat/completions；
+- Dify 接入见 app.dify；本模块只保留两者共用的传输层与 OpenAI 兼容调用；
+- 清洗函数：把模型返回的 JSON 收敛成本系统认识的类型（金额、时间、类别、商户）。
 
-配置全在环境变量里，见 backend/.env.example：
-- AI_PROVIDER=openai 时走任意 OpenAI 兼容服务的 /chat/completions（默认 DeepSeek 官方接口）；
-  文本模型与视觉模型可以分开配置：AI_VISION_BASE_URL / AI_VISION_API_KEY 留空时复用文本模型；
-- AI_PROVIDER=dify 时走 Dify：三条抽取任务各对应一个工作流（DIFY_WORKFLOW_*），
-  图片先上传再作为 file 变量传入；多轮对话走 /v1/chat-messages（见 app.ai.dify）。
-未配置密钥时 configured() 为 False，调用方直接走规则兜底。
+配置全在环境变量里，见 backend/.env.example；未配置密钥时 configured() 为 False，
+调用方直接走规则兜底，接口本身不会失败。
 """
 
 import base64
@@ -19,23 +15,129 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
 
-from app.ai import dify, transport
-from app.ai.transport import AiUnavailable
+from app.db import Category, ensure_utc
 
 logger = logging.getLogger(__name__)
 
-# 先读 backend/.env 再取模块级配置：应用启动时本模块可能早于 app.db 被导入，
-# 不能让配置落在 dotenv 加载之前。
-load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+# 先读 backend/.env，保证进程内任何入口拿到的都是同一份配置。
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
+
+# 重试退避基数（秒），第 n 次重试等待 RETRY_BACKOFF * n。
+RETRY_BACKOFF = 0.8
+
+# 进程级连接池：每次请求重建 TLS 连接既慢，也容易被网关中途断开（SSL EOF / RST）。
+# httpx.Client 线程安全，FastAPI 的同步路由共用这一个即可；超时按请求传入，
+# 因此 AI_TIMEOUT 改了也不用重建。
+_client = httpx.Client(
+    limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+)
+
+
+class AiUnavailable(Exception):
+    """模型服务不可用：未配置、超时、HTTP 错误或返回无法解析。
+
+    调用方捕获后走规则兜底，接口本身仍然返回 200。
+    """
+
+
+class BadRequest(Exception):
+    """服务端返回 400：通常是请求体里有它不认识的字段。
+
+    由调用方判断能否降级（例如去掉 response_format）后再重试。
+    """
+
+    def __init__(self, body: str) -> None:
+        super().__init__(body)
+        self.body = body
+
+
+def timeout() -> float:
+    """单次请求超时（秒），每次调用时读环境变量，便于测试和热改。"""
+    return float(os.getenv("AI_TIMEOUT", "20"))
+
+
+def retries() -> int:
+    """额外重试次数，每次调用时读环境变量。"""
+    return int(os.getenv("AI_RETRIES", "2"))
+
+
+def _post(
+    url: str,
+    *,
+    headers: dict[str, str],
+    json_body: dict | None = None,
+    data: dict | None = None,
+    files: dict | None = None,
+) -> httpx.Response:
+    """发送 POST 并按状态码决定重试、降级还是判不可用。"""
+    last_error = ""
+    for attempt in range(retries() + 1):
+        try:
+            resp = _client.post(
+                url,
+                headers=headers,
+                json=json_body,
+                data=data,
+                files=files,
+                timeout=timeout(),
+            )
+        except httpx.TimeoutException:
+            last_error = f"请求超时（{timeout():g}s）"
+        except httpx.HTTPError as exc:
+            last_error = f"网络错误：{exc}"
+        else:
+            if resp.status_code == 400:
+                raise BadRequest(resp.text[:500])
+            if resp.status_code in (429, 500, 502, 503, 504):
+                last_error = f"HTTP {resp.status_code}：{resp.text[:200]}"
+            elif resp.is_success:
+                return resp
+            else:
+                raise AiUnavailable(
+                    f"模型服务返回 HTTP {resp.status_code}：{resp.text[:200]}"
+                )
+
+        if attempt < retries():
+            delay = RETRY_BACKOFF * (attempt + 1)
+            logger.warning(
+                "模型请求失败，%.1fs 后重试（第 %s 次）：%s",
+                delay,
+                attempt + 1,
+                last_error,
+            )
+            time.sleep(delay)
+
+    raise AiUnavailable(f"模型请求失败：{last_error}")
+
+
+def post_json(url: str, payload: dict, headers: dict[str, str]) -> httpx.Response:
+    """发送 JSON 请求，返回 2xx 响应。"""
+    return _post(url, headers=headers, json_body=payload)
+
+
+def post_multipart(
+    url: str,
+    data: dict,
+    files: dict,
+    headers: dict[str, str],
+) -> httpx.Response:
+    """发送 multipart 请求（文件上传），返回 2xx 响应。"""
+    return _post(url, headers=headers, data=data, files=files)
+
+
+
 
 # 仅用于 /ai/status 展示；实际请求每次从 transport 读环境变量。
-AI_TIMEOUT = transport.timeout()
-AI_RETRIES = transport.retries()
+AI_TIMEOUT = timeout()
+AI_RETRIES = retries()
 
 # 三种任务共用一套配置，Dify 侧按任务选工作流。
 TASK_TEXT = "text_extract"
@@ -48,22 +150,6 @@ _REQUIRED_ENV = {
     "openai": ("AI_API_KEY",),
 }
 
-__all__ = [
-    "AiUnavailable",
-    "TASK_QUERY",
-    "TASK_RECEIPT",
-    "TASK_TEXT",
-    "chat",
-    "chat_configured",
-    "configured",
-    "extract_json",
-    "missing_config",
-    "model_name",
-    "provider",
-    "vision_configured",
-    "vision_model_name",
-]
-
 
 # 单次请求的输出上限。思考型模型先消耗思考 token 再输出正文，
 # 800 这种小上限容易被思考占满、正文为空，这里留够余量。
@@ -74,18 +160,18 @@ _OPTIONAL_FIELDS = ("response_format", "thinking")
 
 
 def provider() -> str:
-    """当前 provider，取值 dify 或 openai。"""
-    return os.getenv("AI_PROVIDER", "dify").strip().lower()
+    """当前 provider，取值 openai 或 dify；默认走 OpenAI 兼容接口。"""
+    return os.getenv("AI_PROVIDER", "openai").strip().lower()
 
 
 def _thinking_disabled() -> bool:
-    """AI_THINKING=off 时是否要求模型跳过思考。
+    """是否让模型跳过思考，默认跳过。
 
-    字段抽取和意图解析都是短任务，思考过程只会多花 token 与等待时间。
-    发的是 DeepSeek 系接口的 thinking 字段；服务端不认这个字段返回 400 时，
-    _post_chat() 会去掉它重试，不影响其他兼容服务。
+    字段抽取和意图解析都是短任务，思考过程只会多花 token 与等待时间；
+    需要更强推理时设 AI_THINKING=on。发的是 DeepSeek 系接口的 thinking 字段，
+    服务端不认这个字段返回 400 时，_post_chat() 会去掉它重试。
     """
-    return os.getenv("AI_THINKING", "").strip().lower() in {"off", "false", "0", "disabled"}
+    return os.getenv("AI_THINKING", "").strip().lower() not in {"on", "true", "1", "enabled"}
 
 
 def _api_key() -> str:
@@ -93,13 +179,8 @@ def _api_key() -> str:
     return os.getenv("AI_API_KEY", "").strip()
 
 
-def _vision_api_key() -> str:
-    """视觉模型的密钥；没单独配置时复用文本模型密钥。"""
-    return os.getenv("AI_VISION_API_KEY", "").strip() or _api_key()
-
-
 def configured() -> bool:
-    """是否配置了可用的文本模型服务。"""
+    """是否配置了可用的模型服务。"""
     if provider() == "dify":
         return dify.configured()
     return bool(_api_key())
@@ -117,13 +198,14 @@ def missing_config() -> list[str]:
 
 
 def vision_configured() -> bool:
-    """图片识别是否可用。
+    """图片识别是否可用：与文本模型同一套配置。
 
-    Dify 由工作流内部选模型，只要工作流可用即可；OpenAI 兼容方式需要视觉模型名与密钥。
+    deepseek-flash 这类多模态模型文本与图片共用一个模型和密钥；
+    Dify 方式由工作流内部选模型，只要工作流可用即可。
     """
     if provider() == "dify":
         return dify.configured()
-    return bool(vision_model_name()) and bool(_vision_api_key())
+    return bool(_api_key())
 
 
 def chat_configured() -> bool:
@@ -141,20 +223,13 @@ def model_name() -> str:
 
 
 def vision_model_name() -> str:
-    """视觉模型名；Dify 方式返回工作流名，空串表示未启用图片识别。"""
-    if provider() == "dify":
-        return dify.workflow_name(TASK_RECEIPT) if dify.configured() else ""
-    return os.getenv("AI_VISION_MODEL", "").strip()
+    """图片识别用的模型名：与文本模型相同，多模态模型不需要单独配置。"""
+    return model_name()
 
 
 def _base_url() -> str:
     """OpenAI 兼容服务的根地址，去掉结尾斜杠。"""
     return os.getenv("AI_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
-
-
-def _vision_base_url() -> str:
-    """视觉模型服务的根地址；没单独配置时复用文本模型地址。"""
-    return (os.getenv("AI_VISION_BASE_URL", "").strip() or _base_url()).rstrip("/")
 
 
 def _strip_code_fence(text: str) -> str:
@@ -188,8 +263,8 @@ def _post_chat(url: str, payload: dict, headers: dict[str, str]) -> httpx.Respon
     """
     while True:
         try:
-            return transport.post_json(url, payload, headers)
-        except transport.BadRequest as exc:
+            return post_json(url, payload, headers)
+        except BadRequest as exc:
             dropped = next(
                 (name for name in _OPTIONAL_FIELDS if name in payload and name in exc.body),
                 None,
@@ -223,18 +298,14 @@ def _call_openai(system: str, user: str, model: str, image: bytes, mime: str) ->
     """调用 OpenAI 兼容的 /chat/completions，返回模型输出的文本。
 
     image 非空时把图片作为 image_url 一起发送，用于小票识别；
-    此时使用视觉模型的地址与密钥（未单独配置则复用文本模型）。
+    图片与文本共用同一个模型和密钥。
     """
     if image:
-        base_url = _vision_base_url()
-        api_key = _vision_api_key()
         content: object = [
             {"type": "text", "text": user},
             {"type": "image_url", "image_url": {"url": _to_data_url(image, mime)}},
         ]
     else:
-        base_url = _base_url()
-        api_key = _api_key()
         content = user
 
     payload: dict = {
@@ -251,8 +322,8 @@ def _call_openai(system: str, user: str, model: str, image: bytes, mime: str) ->
     if _thinking_disabled():
         payload["thinking"] = {"type": "disabled"}
 
-    headers = {"Authorization": f"Bearer {api_key}"}
-    resp = _post_chat(f"{base_url}/chat/completions", payload, headers)
+    headers = {"Authorization": f"Bearer {_api_key()}"}
+    resp = _post_chat(f"{_base_url()}/chat/completions", payload, headers)
     return _response_text(resp)
 
 
@@ -328,9 +399,7 @@ def extract_json(
         model = dify.workflow_name(task)
         raw = dify.run_workflow(task, system, user, image=image, mime=mime)
     else:
-        model = vision_model_name() if image else model_name()
-        if image and not model:
-            raise AiUnavailable("未配置视觉模型 AI_VISION_MODEL")
+        model = model_name()
         raw = _call_openai(system, user, model, image, mime)
 
     result = _parse_json(raw)
@@ -342,3 +411,74 @@ def extract_json(
         time.perf_counter() - started,
     )
     return result
+
+
+# 记账用的本地时区；模型给出不带时区的时间时按它理解。
+APP_TZ = timezone(timedelta(hours=8))
+
+# 商户名与数据库 varchar(30) 对齐。
+MERCHANT_MAX = 30
+
+
+def amount_cents(value: object) -> int | None:
+    """金额从「元」转「分」；非法或非正数返回 None。"""
+    if value is None:
+        return None
+    try:
+        cents = int((Decimal(str(value)) * 100).to_integral_value())
+    except (InvalidOperation, ValueError):
+        return None
+    return cents if cents > 0 else None
+
+
+def occurred_at(value: object) -> datetime | None:
+    """时间字符串转成带 UTC 时区的 datetime；解析失败返回 None。"""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=APP_TZ)
+    return ensure_utc(parsed)
+
+
+def category(value: object) -> Category | None:
+    """类别必须落在枚举内，其余一律视为未识别。"""
+    if not isinstance(value, str):
+        return None
+    try:
+        return Category(value.strip())
+    except ValueError:
+        return None
+
+
+def merchant(value: object) -> str | None:
+    """商户名去空格并截断到列宽；空串返回 None。"""
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned[:MERCHANT_MAX] if cleaned else None
+
+
+def confidence(value: object) -> float:
+    """置信度收敛到 0~1；非法时给 0.5。"""
+    try:
+        parsed = float(str(value))
+    except (TypeError, ValueError):
+        return 0.5
+    return min(max(parsed, 0.0), 1.0)
+
+
+def date_range(
+    start: object,
+    end: object,
+) -> tuple[datetime | None, datetime | None]:
+    """解析问句里的起止时间，返回带 UTC 时区的闭区间。"""
+    return occurred_at(start), occurred_at(end)
+
+
+# dify.py 复用本模块的传输与错误类型；放在末尾导入以避开循环依赖。
+from app import dify  # noqa: E402

@@ -1,6 +1,6 @@
-"""Dify 接入：任务工作流、图片上传与多轮对话。
+"""Dify 接入：任务工作流、文件上传与多轮对话。
 
-三条抽取任务各对应一个 Dify 工作流，输入变量约定：
+三条抽取任务各对应一个工作流，输入变量约定：
 - text：用户原话或问句（必填）；
 - system_prompt：提示词（可选，工作流不需要时忽略）；
 - 图片：小票识别先走 /v1/files/upload 拿 upload_file_id，再以 DIFY_FILE_INPUT
@@ -9,7 +9,7 @@
 对话型应用（chatflow / agent）走 /v1/chat-messages，由 Dify 维护多轮上下文和工具调用；
 后端只保存 conversation_id 与消息记录。
 
-工作流输出约定：outputs.result 为 JSON 字符串或 JSON 对象，字段与 schemas 中的
+工作流输出约定：outputs.result 为 JSON 字符串或 JSON 对象，字段与 api.py 的
 TransactionDraft / QueryIntent 对齐。
 """
 
@@ -18,7 +18,7 @@ import os
 
 import httpx
 
-from app.ai.transport import AiUnavailable, BadRequest, post_json, post_multipart
+from app.ai_client import AiUnavailable, BadRequest, post_json, post_multipart
 
 # 任务名 → 工作流名环境变量；未配置时回退到 DIFY_WORKFLOW_NAME。
 _WORKFLOW_ENV = {

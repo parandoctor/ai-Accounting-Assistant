@@ -28,52 +28,40 @@
 - 大模型走 OpenAI 兼容接口，也可切到 Dify 工作流；配置项见 `backend/.env.example`，接入状态可查 `GET /ai/status`。
 - 智能助手支持多轮对话：Dify 对话应用或兼容接口（历史由后端保存并随请求带上），都不可用时退回本地单轮解析。
 - Streamlit 前端位于 `frontend/`，覆盖记账、查账、统计、预算与智能助手五个功能区。
-- OpenAPI 契约可由 `backend/export_openapi.py` 导出；服务启动后可访问 `/docs` 查看交互式接口文档。
+- 服务启动后可访问 `/docs` 查看交互式接口文档，`GET /openapi.json` 可取完整契约。
 
 ## 项目结构
 
 ```text
 ai-Accounting-Assistant/
-├── backend/                        # 后端服务
+├── backend/                        # 后端服务，业务代码 8 个文件
 │   ├── app/
-│   │   ├── main.py                 # 应用入口：初始化数据库、中间件、路由
-│   │   ├── db.py                   # MySQL 连接、建表与按请求注入连接
-│   │   ├── store.py                # 数据访问层：账目、草稿、预算的读写
-│   │   ├── api/
-│   │   │   ├── transactions.py     # 解析、保存、查询、删除账目
-│   │   │   ├── query.py            # 自然语言查账：解析条件、直接返回结果
-│   │   │   ├── receipts.py         # 小票/截图上传与草稿
-│   │   │   ├── stats.py            # 分类统计
-│   │   │   └── budgets.py          # 预算设置、查询与超支状态
-│   │   ├── schemas/
-│   │   │   ├── common.py           # 时间范围查询参数
-│   │   │   ├── transaction.py      # 记账请求/响应与枚举
-│   │   │   ├── query.py            # 查账请求与响应
-│   │   │   ├── stats.py            # 统计响应
-│   │   │   ├── budget.py           # 预算请求/响应
-│   │   │   └── meta.py             # 类别、健康检查与大模型状态响应
-│   │   ├── ai/
-│   │   │   ├── llm.py              # 大模型调用：OpenAI 兼容接口 / Dify 工作流
-│   │   │   ├── parsing.py          # 模型输出字段清洗（金额、时间、类别）
-│   │   │   ├── rules.py            # 规则兜底：关键词与正则
-│   │   │   ├── text_extract.py     # 一句话记账的字段抽取
-│   │   │   ├── query_extract.py    # 自然语言查账的条件解析
-│   │   │   └── receipt_ocr.py      # 小票与支付截图识别
-│   │   └── core/
-│   │       └── errors.py           # 统一错误结构与异常处理
-│   ├── export_openapi.py           # 导出 OpenAPI 契约
+│   │   ├── main.py                 # 入口：建库建表、CORS、挂路由、/health 等基础接口
+│   │   ├── api.py                  # HTTP 层：请求/响应模型与六个路由
+│   │   ├── error.py                # 统一错误结构 {code, message, detail} 与异常处理器
+│   │   ├── db.py                   # 存储层：领域枚举、MySQL 连接、建表与全部 SQL
+│   │   ├── ai_client.py            # 模型调用：传输重试 + OpenAI 兼容接口 + 字段清洗
+│   │   ├── dify.py                 # Dify 接入：任务工作流、文件上传、对话应用
+│   │   ├── ai_tasks.py             # 抽取任务：一句话记账、查账解析、小票识别、规则兜底
+│   │   └── ai_chat.py              # 多轮对话：Dify / 兼容接口 / 本地兜底三路降级
 │   ├── schema.sql                  # 建表脚本，应用启动时读取执行
 │   ├── sample.csv                  # 示例流水，可用 MySQL 客户端导入演示
-│   ├── requirements.txt
 │   ├── .env.example                # 环境变量示例
 │   └── Dockerfile
 ├── frontend/                       # 前端页面
-│   ├── app.py                      # 单文件页面：记账、查账、统计、预算四个功能区
-│   └── requirements.txt            # 依赖声明（streamlit、pandas、altair、requests）
-├── docs/                           # 接口文档
-├── pyproject.toml                  # 后端依赖声明
-└── uv.lock                         # 后端依赖锁定
+│   ├── app.py                      # 单文件页面：记账、查账、统计、预算、智能助手
+│   └── .streamlit/config.toml      # 主题色、上传大小与图表配色
+└── docs/                           # 接口文档
 ```
+
+## 依赖
+
+| 端 | 依赖 |
+|---|---|
+| 后端 | `fastapi`、`uvicorn[standard]`、`pymysql`、`cryptography`、`python-dotenv`、`httpx`、`python-multipart` |
+| 前端 | `streamlit`、`pandas`、`altair`、`requests` |
+
+运行环境要求 Python 3.11+。
 
 ## 启动方式
 
@@ -81,56 +69,60 @@ ai-Accounting-Assistant/
 
 ```powershell
 cd backend
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+python -m venv .venv
+.\.venv\Scripts\pip.exe install fastapi "uvicorn[standard]" pymysql cryptography python-dotenv httpx python-multipart
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-数据库连接参数写在 `backend/.env`（复制 `backend/.env.example` 后填入 MySQL 账号密码），
-应用启动时会自动建库建表。
+启动前先按下一节「接入大模型」把 `backend/.env` 准备好；应用启动时会自动建库建表。
 
 前端（端口 8501）：
 
 ```powershell
 cd frontend
-uv venv
-uv pip install -r requirements.txt
+python -m venv .venv
+.\.venv\Scripts\pip.exe install streamlit pandas altair requests
 .\.venv\Scripts\python.exe -m streamlit run app.py
 ```
-
-注意 `frontend/` 只有 `requirements.txt`、没有 `pyproject.toml`，所以不能用 `uv sync`；
-也不要写 `uv run streamlit`：`uv run` 会向上找到仓库根目录的 `pyproject.toml` 并复用根目录的 `.venv`，
-那里没装 streamlit，会报 `Failed to spawn: streamlit`。
 
 前端默认请求 `http://127.0.0.1:8000`，可用环境变量 `API_URL` 覆盖（例如后端换了端口时）。
 
 ## 接入大模型
 
-文本模型与视觉模型分开配置，都写在 `backend/.env`：
+1. 打开 `backend/.env.example`，填写两项：
 
-| 变量 | 作用 |
-|---|---|
-| `AI_PROVIDER` | `openai`=任意 OpenAI 兼容接口（默认 DeepSeek 官方），`dify`=自建工作流 |
-| `AI_BASE_URL` / `AI_MODEL` / `AI_API_KEY` | 一句话记账、自然语言查账与多轮对话用的文本模型 |
-| `AI_VISION_MODEL` | 小票与支付截图识别用的视觉模型；留空表示不启用图片识别 |
-| `AI_VISION_BASE_URL` / `AI_VISION_API_KEY` | 视觉模型单独的地址与密钥；留空则复用文本模型那组 |
-| `AI_TIMEOUT` / `AI_RETRIES` | 单次调用超时（秒）与 429/5xx/超时的重试次数 |
-| `AI_THINKING` | DeepSeek 思考型模型的思考开关，`off` 跳过思考以提速省 token；留空用服务端默认 |
+   - `DB_PASSWORD`：本机 MySQL 的 root 密码；
+   - `AI_API_KEY`：DeepSeek 密钥，在 https://platform.deepseek.com 申请。
 
-小票识别要模型支持图片输入：文本模型本身是多模态的（如 `deepseek-flash`）时，
-`AI_VISION_MODEL` 填同一个模型名、地址与密钥留空即可复用；文本模型不带视觉能力时，
-再单独填 `AI_VISION_BASE_URL` 和 `AI_VISION_API_KEY` 指向另一个兼容服务。
+2. 保存后把文件重命名为 `.env`（同在 `backend/` 目录，文件名以点开头）。
+   想保留模板的话，复制一份再改名。
 
-配置写好后先跑自检，不用启动服务：
+3. 重启后端：在后端终端按 `Ctrl + C` 停掉当前进程，再执行启动命令：
 
-```powershell
-cd backend
-uv run python check_ai.py
-uv run python check_ai.py --image 小票.png
-```
+   ```powershell
+   .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+   ```
 
-脚本依次验证一句话记账、自然语言查账、小票识别、多轮对话四条链路；`engine` 为 `llm`
-（对话走 Dify 时为 `dify`）表示模型真的通了，`rule`（对话为 `local`）表示调用失败后退回规则解析，
-具体原因看日志。服务运行时也可以查 `GET /ai/status`：`missing_config` 直接列出还缺哪些
-环境变量，为空才说明 AI 链路真的走模型，否则三条抽取链路都会（静默地）退回规则解析。
+接入模型后，项目可以完成以下功能：
+
+- 一句话记账：把「昨天午饭在沙县吃了 23 块」转成金额、商户、类别、时间四个字段的待确认草稿；
+- 自然语言查账：把「这个月吃饭花了多少」转成类别与时间条件，直接返回合计、笔数和明细；
+- 小票/截图识别：上传消费凭证图片，识别金额、商户与交易时间；
+- 智能助手：多轮对话，能接着上一轮继续追问。
+
+默认使用 DeepSeek 官方接口的 `deepseek-flash` 模型，文本与图片由同一个模型处理，不需要分开配置。
+
+确认接入是否成功：访问 `http://127.0.0.1:8000/ai/status`，`configured` 为 `true` 说明密钥已生效；
+或调用 `POST /transactions/parse`，返回的 `engine` 为 `llm` 表示走模型，为 `rule` 表示退回了规则解析。
+
+想换模型或网关时，在 `.env` 里追加下面几项，平时不需要写：
+
+| 变量 | 默认值 | 作用 |
+|---|---|---|
+| `AI_BASE_URL` | `https://api.deepseek.com/v1` | OpenAI 兼容地址 |
+| `AI_MODEL` | `deepseek-flash` | 文本与图片共用这一个模型 |
+| `AI_TIMEOUT` / `AI_RETRIES` | `20` / `2` | 超时（秒）与重试次数 |
+| `AI_THINKING` | 关闭思考 | 设 `on` 打开深度思考 |
 
 ## 待开发领域
 
@@ -141,6 +133,6 @@ uv run python check_ai.py --image 小票.png
 | 数据库 | 已接入 MySQL，启动时自动建库建表并补齐索引 | 补充迁移脚本，支持表结构调整与生产实例部署 |
 | Docker 部署 | Dockerfile 已准备 | 完成镜像构建、容器编排、环境变量与数据卷联调 |
 | AI 文本抽取 | 已接入大模型，输出 JSON 后统一校验；无密钥或调用失败退回规则 | 补抽取准确率评测集，按错误类型迭代提示词 |
-| 小票/图片识别 | 视觉模型抽取，可与文本模型分开配置；未配置 `AI_VISION_MODEL` 时返回空草稿 | 补真实小票样本，验证金额与日期识别率 |
+| 小票/图片识别 | 图片交给 `deepseek-flash` 直接识别；识别失败时返回空草稿由用户补全 | 补真实小票样本，验证金额与日期识别率 |
 | 自然语言查账 | 后端 `/query/parse`、`/query/ask`：问句转类别与时间区间并直接返回结果 | 前端已接入 `/query/ask`，支持快捷问题 |
 | 预算管理 | 后端已实现：按月设置总预算/类别预算并给出超支状态 | 前端预算页已接入，后续支持修改历史与提醒推送 |

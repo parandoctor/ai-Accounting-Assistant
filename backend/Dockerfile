@@ -8,13 +8,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# 先拷依赖清单再装，改代码时不会重装依赖。
-COPY requirements.txt .
-
+# 依赖直接写在镜像里，仓库不再维护单独的依赖清单文件。
 # 国内网络直连 PyPI 经常超时/断开，默认走清华镜像。
 # 需要走官方源时：docker build --build-arg PIP_INDEX_URL=https://pypi.org/simple -t ...
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-RUN pip install --no-cache-dir -i "$PIP_INDEX_URL" -r requirements.txt
+RUN pip install --no-cache-dir -i "$PIP_INDEX_URL" \
+    fastapi \
+    "uvicorn[standard]" \
+    pymysql \
+    cryptography \
+    python-dotenv \
+    httpx \
+    python-multipart
 
 COPY app ./app
 # 建表脚本在运行时读取，必须一起进镜像。
