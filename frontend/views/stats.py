@@ -23,10 +23,12 @@ from formatting import (
 from components import empty_state, flash
 
 
-RANGE_OPTIONS = ["本月", "上月", "近 30 天", "今年", "全部", "自定义"]
+RANGE_OPTIONS = ["本月", "上月", "指定月份", "近 30 天", "今年", "全部", "自定义"]
 
 
-def resolve_range(option: str, custom_start: date, custom_end: date):
+def resolve_range(
+    option: str, custom_start: date, custom_end: date, month: str | None = None
+):
     """把时间范围选项换算成 (from, to) 两个 ISO 字符串；返回 None 表示不限。"""
     today = date.today()
     if option == "本月":
@@ -38,6 +40,8 @@ def resolve_range(option: str, custom_start: date, custom_end: date):
             iso_at(last_month_end.replace(day=1)),
             iso_at(last_month_end, time(23, 59, 59)),
         )
+    if option == "指定月份" and month:
+        return month_bounds(month)
     if option == "近 30 天":
         return iso_at(today - timedelta(days=29)), iso_at(today, time(23, 59, 59))
     if option == "今年":
@@ -55,11 +59,13 @@ def month_bounds(month: str) -> tuple[str, str]:
     return iso_at(start), iso_at(end, time(23, 59, 59))
 
 
-def previous_period(option: str) -> tuple[str | None, str | None]:
+def previous_period(
+    option: str, month: str | None = None
+) -> tuple[str | None, str | None]:
     """上一个等长周期的起止时间，用于环比；不支持的选项返回 (None, None)。
 
     「本月」页面统计的是月初到当天，对比基期也截到同一天数（上月没有这一天时
-    取月末），避免不足一个月和整月相减；「上月」是整月，对比前月整月。
+    取月末），避免不足一个月和整月相减；「上月」和「指定月份」都是整月，对比前月整月。
     """
     today = date.today()
     last_month_end = today.replace(day=1) - timedelta(days=1)
@@ -69,11 +75,16 @@ def previous_period(option: str) -> tuple[str | None, str | None]:
         return iso_at(last_month_start), iso_at(
             last_month_end.replace(day=same_day), time(23, 59, 59)
         )
-    if option == "上月":
-        prev_month_end = last_month_start - timedelta(days=1)
+    if option in ("上月", "指定月份") and (option == "上月" or month):
+        if option == "上月" or not month:
+            anchor = last_month_start
+        else:
+            year, mon = (int(part) for part in month.split("-"))
+            anchor = date(year, mon, 1)
+        prev_end = anchor - timedelta(days=1)
         return (
-            iso_at(prev_month_end.replace(day=1)),
-            iso_at(prev_month_end, time(23, 59, 59)),
+            iso_at(prev_end.replace(day=1)),
+            iso_at(prev_end, time(23, 59, 59)),
         )
     if option == "近 30 天":
         end = today - timedelta(days=30)
@@ -154,7 +165,16 @@ def render_stats_page() -> None:
         with col_end:
             custom_end = st.date_input("结束日期", value=custom_end, key="stats_to")
 
-    date_from, date_to = resolve_range(option, custom_start, custom_end)
+    month_choice = None
+    if option == "指定月份":
+        month_choice = st.selectbox(
+            "选择月份",
+            month_options(24),
+            key="stats_month",
+            help="可选最近 24 个月，环比会与它的上一个月比较",
+        )
+
+    date_from, date_to = resolve_range(option, custom_start, custom_end, month_choice)
 
     # ---------- 类型筛选：全部 + 七个类别 ----------
     st.caption("类型筛选")
@@ -197,31 +217,41 @@ def render_stats_page() -> None:
 
     # 环比：只对能算出上一等长周期的选项计算，且只在「全部」类别时显示
     delta = None
+    change_cents = None
+    prev_total = None
     if selected == "全部":
-        prev_from, prev_to = previous_period(option)
+        prev_from, prev_to = previous_period(option, month_choice)
         if prev_from and prev_to:
             try:
                 prev_total = api_get(
                     "/stats/category", params={"from": prev_from, "to": prev_to}
                 ).get("total_cents", 0)
             except ApiError:
-                prev_total = 0
+                prev_total = None
             if prev_total:
-                delta = f"{(total_cents - prev_total) / prev_total * 100:+.0f}% 环比"
+                change_cents = total_cents - prev_total
+                delta = f"{change_cents / prev_total * 100:+.0f}%"
 
     with st.container(border=True):
-        col_1, col_2, col_3 = st.columns(3)
-        col_1.metric(
+        cols = st.columns(4 if delta else 3)
+        cols[0].metric(
             "总支出" if selected == "全部" else f"{selected}支出",
             fmt_money(total_cents),
             delta=delta,
             delta_color="inverse",
         )
-        col_2.metric("笔数", f"{count} 笔")
+        cols[1].metric("笔数", f"{count} 笔")
         if selected == "全部":
-            col_3.metric("类别数", f"{len(items)} 类")
+            cols[2].metric("类别数", f"{len(items)} 类")
         else:
-            col_3.metric("占全部支出", f"{chosen['ratio']:.0%}" if chosen else "0%")
+            cols[2].metric("占全部支出", f"{chosen['ratio']:.0%}" if chosen else "0%")
+        if delta and change_cents is not None:
+            sign = "↑" if change_cents > 0 else "↓"
+            cols[3].metric(
+                "较上期",
+                f"{sign} {fmt_money(abs(change_cents))}",
+                help=f"上期支出 {fmt_money(prev_total)}",
+            )
 
     # 最大类别单独一行说明，避免塞进指标卡被截断
     if selected == "全部" and top:
@@ -234,6 +264,9 @@ def render_stats_page() -> None:
             f"当前只看「{selected}」；全部类别合计 {fmt_money(all_total_cents)}，"
             "下方图表仍显示全部类别并高亮选中项。"
         )
+
+    if delta and prev_from and prev_to:
+        st.caption(f"环比基期：{fmt_local(prev_from)} ~ {fmt_local(prev_to)}")
 
     # 本月视图额外带上预算进度，和「预算管理」页呼应
     if option == "本月":
@@ -319,16 +352,24 @@ def render_stats_page() -> None:
     else:
         empty_state("📭", "这个时间范围没有账单", "换个时间范围试试，或先去记一笔")
 
-    # ---------- 每日对比（本月） ----------
+    # ---------- 每日对比（本月 / 指定月份） ----------
     st.divider()
-    st.subheader("📅 每日对比（本月）")
-    month_start = date.today().replace(day=1)
+    if option == "指定月份" and month_choice:
+        year, mon = (int(part) for part in month_choice.split("-"))
+        daily_start = date(year, mon, 1)
+        daily_end = date(year + (mon // 12), mon % 12 + 1, 1) - timedelta(days=1)
+        daily_title = f"📅 每日对比（{month_choice}）"
+    else:
+        daily_start = date.today().replace(day=1)
+        daily_end = date.today()
+        daily_title = "📅 每日对比（本月）"
+    st.subheader(daily_title)
     try:
         month_records = api_get(
             "/transactions",
             params={
-                "from": iso_at(month_start),
-                "to": iso_at(date.today(), time(23, 59, 59)),
+                "from": iso_at(daily_start),
+                "to": iso_at(daily_end, time(23, 59, 59)),
                 "category": None if selected == "全部" else selected,
                 "limit": 100,
             },
@@ -346,10 +387,10 @@ def render_stats_page() -> None:
 
     if daily:
         today = date.today()
-        # 补齐 1 号到今天的每一天，缺数据的日子显示 0，横轴按日期顺序
+        # 补齐该月每一天（未来日期不补），缺数据的日子显示 0，横轴按日期顺序
         all_days = [
-            month_start + timedelta(days=offset)
-            for offset in range((today - month_start).days + 1)
+            daily_start + timedelta(days=offset)
+            for offset in range((daily_end - daily_start).days + 1)
         ]
         daily_frame = pd.DataFrame(
             [
@@ -389,9 +430,9 @@ def render_stats_page() -> None:
         )
         st.altair_chart(daily_bars + daily_labels, width="stretch")
         scope = "全部类别" if selected == "全部" else f"「{selected}」"
-        st.caption(f"本月{scope}的每日支出，今天的柱子用深色标出。")
+        st.caption(f"{daily_title[2:]}{scope}的每日支出，今天的柱子用深色标出。")
     else:
-        empty_state("📅", "本月还没有账单", "记几笔之后这里会按天显示支出")
+        empty_state("📅", "该月还没有账单", "记几笔之后这里会按天显示支出")
 
     # ---------- 月度对比 ----------
     st.divider()
