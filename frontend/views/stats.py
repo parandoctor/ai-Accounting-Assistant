@@ -134,6 +134,11 @@ def render_delete_transaction(items: list[dict]) -> None:
         st.rerun()
 
 
+def _clear_pick_day() -> None:
+    """回调：清空「按天查看」，恢复按时间范围筛选。"""
+    st.session_state["stats_pick_day"] = None
+
+
 def render_stats_page() -> None:
     """页面 3：账单明细 + 分类统计。"""
     st.header("📊 账单与统计")
@@ -430,17 +435,22 @@ def render_stats_page() -> None:
     st.divider()
     st.subheader("🧾 账单明细")
 
-    # 按天查看：从最近 30 天里选一天，只看当天；默认全部
-    day_options = ["全部"] + [
-        (date.today() - timedelta(days=offset)).isoformat() for offset in range(30)
-    ]
-    picked_label = st.selectbox(
-        "按天查看",
-        day_options,
-        key="stats_pick_day",
-        help="选一个日期只看当天账单；选「全部」则按上面的时间范围",
-    )
-    pick_day = None if picked_label == "全部" else date.fromisoformat(picked_label)
+    # 按天查看：用日历选一天，只看当天；点「全部」恢复时间范围
+    col_day, col_clear = st.columns([4, 1])
+    with col_day:
+        pick_day = st.date_input(
+            "按天查看",
+            value=None,
+            key="stats_pick_day",
+            help="点开日历选一天，只看当天账单；点右侧「全部」恢复时间范围",
+        )
+    with col_clear:
+        st.button(
+            "全部",
+            key="stats_clear_day",
+            on_click=_clear_pick_day,
+            use_container_width=True,
+        )
 
     day_from, day_to = date_from, date_to
     if pick_day:
