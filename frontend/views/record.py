@@ -170,12 +170,12 @@ def render_draft_preview(draft: dict) -> None:
         st.number_input(
             "AA 分摊人数",
             min_value=1,
-            max_value=20,
+            max_value=999,
             step=1,
             key=keys["form_split"],
             on_change=recalc_split,
             args=(keys,),
-            help="默认 1（不分摊）；识别到 AA / 平摊时自动设为 2",
+            help="默认 1（不分摊）；识别到 AA / 平摊时自动设为 2，最多 999 人",
         )
     with col_hint:
         total = float(st.session_state.get(keys["form_total"], 0.0) or 0.0)
