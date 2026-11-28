@@ -10,7 +10,16 @@ import streamlit as st
 
 from config import CATEGORIES, CATEGORY_COLORS, CATEGORY_ICONS
 from api_client import ApiError, api_delete, api_get
-from formatting import export_csv, fmt_local, fmt_money, iso_at, month_options, to_yuan, transactions_frame
+from formatting import (
+    export_csv,
+    fmt_local,
+    fmt_money,
+    iso_at,
+    month_options,
+    to_local,
+    to_yuan,
+    transactions_frame,
+)
 from components import empty_state, flash
 
 
@@ -305,47 +314,135 @@ def render_stats_page() -> None:
     else:
         empty_state("📭", "这个时间范围没有账单", "换个时间范围试试，或先去记一笔")
 
-    # ---------- 月度趋势 ----------
+    # ---------- 每日对比（本月） ----------
     st.divider()
-    st.subheader("📈 近 6 个月支出趋势")
+    st.subheader("📅 每日对比（本月）")
+    month_start = date.today().replace(day=1)
+    try:
+        month_records = api_get(
+            "/transactions",
+            params={
+                "from": iso_at(month_start),
+                "to": iso_at(date.today(), time(23, 59, 59)),
+                "category": None if selected == "全部" else selected,
+                "limit": 100,
+            },
+        ).get("items") or []
+    except ApiError as exc:
+        st.error(f"读取每日数据失败：{exc.message}")
+        month_records = []
+
+    daily: dict[date, float] = {}
+    for row in month_records:
+        local = to_local(row.get("occurred_at"))
+        if not local:
+            continue
+        daily[local.date()] = daily.get(local.date(), 0.0) + to_yuan(row.get("amount_cents"))
+
+    if daily:
+        today = date.today()
+        # 补齐 1 号到今天的每一天，缺数据的日子显示 0，横轴按日期顺序
+        all_days = [
+            month_start + timedelta(days=offset)
+            for offset in range((today - month_start).days + 1)
+        ]
+        daily_frame = pd.DataFrame(
+            [
+                {
+                    "日期": f"{day.month:02d}-{day.day:02d}",
+                    "金额": daily.get(day, 0.0),
+                    "今天": day == today,
+                }
+                for day in all_days
+            ]
+        )
+        st.altair_chart(
+            alt.Chart(daily_frame)
+            .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+            .encode(
+                x=alt.X(
+                    "日期:N",
+                    title=None,
+                    axis=alt.Axis(labelAngle=0, labelOverlap=True),
+                ),
+                y=alt.Y("金额:Q", title="支出（元）"),
+                color=alt.condition(
+                    alt.datum.今天, alt.value("#4F46E5"), alt.value("#C7D2FE")
+                ),
+                tooltip=["日期", alt.Tooltip("金额:Q", format=",.2f")],
+            ),
+            width="stretch",
+        )
+        scope = "全部类别" if selected == "全部" else f"「{selected}」"
+        st.caption(f"本月{scope}的每日支出，今天的柱子用深色标出。")
+    else:
+        empty_state("📅", "本月还没有账单", "记几笔之后这里会按天显示支出")
+
+    # ---------- 月度对比 ----------
+    st.divider()
+    st.subheader("📆 月度对比（近 6 个月）")
     try:
         series = monthly_series(tuple(month_options(6)[::-1]))
     except ApiError as exc:
-        st.error(f"读取趋势失败：{exc.message}")
+        st.error(f"读取月度数据失败：{exc.message}")
         series = []
     if series and any(row["金额"] for row in series):
         trend_frame = pd.DataFrame(series)
-        st.altair_chart(
+        current_month = month_options(1)[0][5:]
+        bars = (
             alt.Chart(trend_frame)
-            .mark_line(
-                color="#4F46E5",
-                strokeWidth=2.5,
-                point=alt.OverlayMarkDef(color="#4F46E5", size=70, filled=True),
-            )
+            .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
             .encode(
                 x=alt.X("月份:N", title=None, axis=alt.Axis(labelAngle=0)),
                 y=alt.Y("金额:Q", title="支出（元）"),
+                color=alt.condition(
+                    alt.datum.月份 == current_month,
+                    alt.value("#4F46E5"),
+                    alt.value("#C7D2FE"),
+                ),
                 tooltip=[
                     alt.Tooltip("全月:N", title="月份"),
                     alt.Tooltip("金额:Q", format=",.2f"),
                 ],
-            ),
-            use_container_width=True,
+            )
         )
-        if selected != "全部":
-            st.caption("趋势图是全部类别的月度合计，不随类型筛选变化。")
+        labels = (
+            alt.Chart(trend_frame)
+            .mark_text(dy=-8, color="#6B7280", fontSize=11)
+            .encode(x=alt.X("月份:N"), y=alt.Y("金额:Q"), text=alt.Text("金额:Q", format=",.0f"))
+        )
+        st.altair_chart(bars + labels, width="stretch")
+        st.caption("本月用深色标出；月度合计为全部类别，不随类型筛选变化。")
     else:
-        empty_state("📈", "还没有趋势数据", "记几笔账之后，这里会显示最近 6 个月的支出变化")
+        empty_state("📆", "还没有月度数据", "记几笔账之后，这里会按月对比支出")
 
     # ---------- 账单明细 ----------
     st.divider()
     st.subheader("🧾 账单明细")
+
+    # 按天查看：从最近 30 天里选一天，只看当天；默认全部
+    day_options = ["全部"] + [
+        (date.today() - timedelta(days=offset)).isoformat() for offset in range(30)
+    ]
+    picked_label = st.selectbox(
+        "按天查看",
+        day_options,
+        key="stats_pick_day",
+        help="选一个日期只看当天账单；选「全部」则按上面的时间范围",
+    )
+    pick_day = None if picked_label == "全部" else date.fromisoformat(picked_label)
+
+    day_from, day_to = date_from, date_to
+    if pick_day:
+        day_from = iso_at(pick_day)
+        day_to = iso_at(pick_day, time(23, 59, 59))
+
     try:
         listing = api_get(
             "/transactions",
             params={
-                "from": date_from,
-                "to": date_to,
+                "from": day_from,
+                "to": day_to,
                 "category": None if selected == "全部" else selected,
                 "limit": 100,
             },
@@ -358,6 +455,8 @@ def render_stats_page() -> None:
     if records:
         st.dataframe(transactions_frame(records), width="stretch", hide_index=True)
         scope = "全部类别" if selected == "全部" else f"类别「{selected}」"
+        if pick_day:
+            scope = f"{scope} · {pick_day:%Y-%m-%d}"
         st.caption(
             f"{scope}：共 {listing.get('total', len(records))} 条，"
             f"当前展示最近 {len(records)} 条。"
