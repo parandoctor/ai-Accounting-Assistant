@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 
 import streamlit as st
@@ -13,11 +14,33 @@ from components import empty_state, flash
 
 
 # 预览表单的字段名；实际控件 key 会拼上草稿 id 后缀，见 form_keys()
-FORM_FIELDS = ("form_money", "form_merchant", "form_category", "form_date", "form_note")
+FORM_FIELDS = (
+    "form_money",
+    "form_total",
+    "form_split",
+    "form_merchant",
+    "form_category",
+    "form_date",
+    "form_note",
+)
 
 # 单笔金额上限（元）。数据库是 DECIMAL(10,2)，上限约 9999 万；
 # 这里收得更紧一些，避免用户误输入天文数字导致后端写入失败。
 MAX_AMOUNT_YUAN = 1_000_000.0
+
+# 类别图标：记账页用图标网格代替下拉框
+CATEGORY_ICONS = {
+    "餐饮": "🍜",
+    "交通": "🚌",
+    "购物": "🛍️",
+    "娱乐": "🎮",
+    "医疗": "💊",
+    "居住": "🏠",
+    "其他": "📦",
+}
+
+# 识别到这些字样时默认按 AA 分摊（人数 2）
+_AA_PATTERN = re.compile(r"(?i)\baa\b|平摊|对半|各付")
 
 
 def form_keys(draft: dict) -> dict[str, str]:
@@ -39,13 +62,19 @@ def apply_draft(draft: dict) -> None:
     """
     keys = form_keys(draft)
     occurred = to_local(draft.get("occurred_at"))
+    total = to_yuan(draft.get("amount_cents"))
+    raw_text = (draft.get("raw_text") or "").strip()
+    # 识别到「AA / 平摊」时默认按 2 人分摊，金额先算成人均
+    split = 2 if _AA_PATTERN.search(raw_text) else 1
+
     st.session_state["draft"] = draft
     st.session_state["draft_datetime"] = occurred
-    st.session_state[keys["form_money"]] = to_yuan(draft.get("amount_cents"))
+    st.session_state[keys["form_total"]] = total
+    st.session_state[keys["form_split"]] = split
+    st.session_state[keys["form_money"]] = round(total / split, 2)
     st.session_state[keys["form_merchant"]] = draft.get("merchant") or ""
     # 备注上限 200 字：一句话记账的原文就是一句备注，可以直接预填；
     # 小票 OCR 原文可能上千字，超过上限就不塞进备注，改在预览区以原文形式展示。
-    raw_text = (draft.get("raw_text") or "").strip()
     st.session_state[keys["form_note"]] = raw_text if len(raw_text) <= 200 else ""
     st.session_state[keys["form_date"]] = (
         occurred.date() if occurred else date.today()
@@ -54,6 +83,13 @@ def apply_draft(draft: dict) -> None:
     st.session_state[keys["form_category"]] = (
         category if category in CATEGORIES else DEFAULT_CATEGORY
     )
+
+
+def recalc_split(keys: dict[str, str]) -> None:
+    """AA 人数变化时，用「识别总额 ÷ 人数」重算人均金额。"""
+    total = float(st.session_state.get(keys["form_total"], 0.0) or 0.0)
+    split = int(st.session_state.get(keys["form_split"], 1) or 1)
+    st.session_state[keys["form_money"]] = round(total / split, 2)
 
 
 def handle_parse_text(text: str) -> None:
@@ -114,37 +150,78 @@ def render_draft_preview(draft: dict) -> None:
             st.text(raw_text)
 
     keys = form_keys(draft)
-    with st.form("save_transaction_form"):
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.number_input(
-                "金额（元）" + ("　⚠️ 未识别" if "amount_cents" in missing else ""),
-                min_value=0.0,
-                max_value=MAX_AMOUNT_YUAN,
-                step=0.5,
-                format="%.2f",
-                key=keys["form_money"],
+
+    # ---------- 金额：大字输入 ----------
+    st.caption("金额（元）")
+    st.number_input(
+        "金额（元）",
+        min_value=0.0,
+        max_value=MAX_AMOUNT_YUAN,
+        step=0.5,
+        format="%.2f",
+        key=keys["form_money"],
+        label_visibility="collapsed",
+        help="识别出的金额，可以直接修改",
+    )
+
+    # ---------- AA 分摊 ----------
+    col_split, col_hint = st.columns([1, 2])
+    with col_split:
+        st.number_input(
+            "AA 分摊人数",
+            min_value=1,
+            max_value=20,
+            step=1,
+            key=keys["form_split"],
+            on_change=recalc_split,
+            args=(keys,),
+            help="默认 1（不分摊）；识别到 AA / 平摊时自动设为 2",
+        )
+    with col_hint:
+        total = float(st.session_state.get(keys["form_total"], 0.0) or 0.0)
+        split = int(st.session_state.get(keys["form_split"], 1) or 1)
+        if split > 1 and total > 0:
+            st.caption(
+                f"识别总额 ¥{total:,.2f} ÷ {split} 人 = ¥{total / split:,.2f}"
             )
-            st.text_input(
-                "商户（必填）" + ("　⚠️ 未识别" if "merchant" in missing else ""),
-                key=keys["form_merchant"],
-                max_chars=30,
-                placeholder="识别不出来时手动填写，例如「食堂」",
-            )
-        with col_b:
-            st.selectbox(
-                "消费类别" + ("　⚠️ 未识别" if "category" in missing else ""),
-                CATEGORIES,
-                key=keys["form_category"],
-            )
-            st.date_input(
-                "消费日期" + ("　⚠️ 未识别" if "occurred_at" in missing else ""),
-                key=keys["form_date"],
-                max_value=date.today(),
-                help="不允许选择未来日期",
-            )
-        st.text_input("备注", key=keys["form_note"], max_chars=200)
-        submitted = st.form_submit_button("💾 保存账单", type="primary")
+        else:
+            st.caption("识别到「AA / 平摊」会自动按人数分摊，也可以手动改人数")
+
+    # ---------- 类别：图标网格 ----------
+    st.caption("消费类别")
+    selected_category = st.session_state[keys["form_category"]]
+    for row in (CATEGORIES[:4], CATEGORIES[4:]):
+        cols = st.columns(len(row))
+        for col, cat in zip(cols, row):
+            with col:
+                if st.button(
+                    f"{CATEGORY_ICONS.get(cat, '📦')} {cat}",
+                    key=f"cat_{keys['form_money']}_{cat}",
+                    type="primary" if cat == selected_category else "secondary",
+                    use_container_width=True,
+                ):
+                    st.session_state[keys["form_category"]] = cat
+                    st.rerun()
+
+    # ---------- 日期 / 商户 / 备注 ----------
+    col_date, col_merchant = st.columns(2)
+    with col_date:
+        st.date_input(
+            "消费日期" + ("　⚠️ 未识别" if "occurred_at" in missing else ""),
+            key=keys["form_date"],
+            max_value=date.today(),
+            help="不允许选择未来日期",
+        )
+    with col_merchant:
+        st.text_input(
+            "商户（选填）",
+            key=keys["form_merchant"],
+            max_chars=30,
+            placeholder="可留空，自动记为「未填写」",
+        )
+    st.text_input("备注", key=keys["form_note"], max_chars=200)
+
+    submitted = st.button("💾 保存账单", type="primary", use_container_width=True)
 
     if not submitted:
         return
@@ -154,12 +231,9 @@ def render_draft_preview(draft: dict) -> None:
         st.error("金额必须大于 0；如果是识别失败，请手动填写实际金额。")
         return
 
-    # 商户是后端必填字段，不能用类别名顶替，否则账单信息会失真
+    # 商户选填：留空时记为「未填写」，既不打断记账，也不产生空字符串
     category = st.session_state[keys["form_category"]]
-    merchant = str(st.session_state[keys["form_merchant"]]).strip()
-    if not merchant:
-        st.error("商户不能为空：识别不出来时请手动填写，例如「食堂」「滴滴」。")
-        return
+    merchant = str(st.session_state[keys["form_merchant"]]).strip() or "未填写"
 
     # 时间：优先保留解析出的时刻，日期用用户确认后的值，统一按东八区提交
     base = st.session_state.get("draft_datetime") or datetime.now(TZ)
