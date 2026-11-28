@@ -7,7 +7,7 @@ from datetime import date, datetime
 
 import streamlit as st
 
-from config import CATEGORIES, DEFAULT_CATEGORY, TZ
+from config import CATEGORIES, CATEGORY_ICONS, DEFAULT_CATEGORY, TZ
 from api_client import ApiError, api_post
 from formatting import to_cents, to_local, to_yuan
 from components import empty_state, flash
@@ -27,17 +27,6 @@ FORM_FIELDS = (
 # 单笔金额上限（元）。数据库是 DECIMAL(10,2)，上限约 9999 万；
 # 这里收得更紧一些，避免用户误输入天文数字导致后端写入失败。
 MAX_AMOUNT_YUAN = 1_000_000.0
-
-# 类别图标：记账页用图标网格代替下拉框
-CATEGORY_ICONS = {
-    "餐饮": "🍜",
-    "交通": "🚌",
-    "购物": "🛍️",
-    "娱乐": "🎮",
-    "医疗": "💊",
-    "居住": "🏠",
-    "其他": "📦",
-}
 
 # 识别到这些字样时默认按 AA 分摊（人数 2）
 _AA_PATTERN = re.compile(r"(?i)\baa\b|平摊|对半|各付")

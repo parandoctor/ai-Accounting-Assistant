@@ -8,7 +8,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from config import CATEGORIES, CATEGORY_COLORS
+from config import CATEGORIES, CATEGORY_COLORS, CATEGORY_ICONS
 from api_client import ApiError, api_delete, api_get
 from formatting import export_csv, fmt_local, fmt_money, iso_at, month_options, to_yuan, transactions_frame
 from components import empty_state, flash
@@ -142,6 +142,25 @@ def render_stats_page() -> None:
 
     date_from, date_to = resolve_range(option, custom_start, custom_end)
 
+    # ---------- 类型筛选：全部 + 七个类别 ----------
+    st.caption("类型筛选")
+    selected = st.session_state.get("stats_category", "全部")
+    filter_options = ["全部"] + CATEGORIES
+    for start in (0, 4):
+        row = filter_options[start : start + 4]
+        cols = st.columns(len(row))
+        for col, name in zip(cols, row):
+            with col:
+                label = "🗂 全部" if name == "全部" else f"{CATEGORY_ICONS.get(name, '📦')} {name}"
+                if st.button(
+                    label,
+                    key=f"stats_cat_{name}",
+                    type="primary" if name == selected else "secondary",
+                    use_container_width=True,
+                ):
+                    st.session_state["stats_category"] = name
+                    st.rerun()
+
     # ---------- 分类统计 ----------
     try:
         stats = api_get("/stats/category", params={"from": date_from, "to": date_to})
@@ -150,34 +169,56 @@ def render_stats_page() -> None:
         return
 
     total_cents = stats.get("total_cents", 0)
+    all_total_cents = total_cents
     items = stats.get("items") or []
     top = max(items, key=lambda i: i["total_cents"]) if items else None
     count = sum(item["count"] for item in items)
 
-    # 环比：只对能算出上一等长周期的选项计算
+    # 选中某个类别时，指标与明细都只看这一类；图表保留全量分布并高亮
+    chosen = None
+    if selected != "全部":
+        chosen = next((item for item in items if item["category"] == selected), None)
+        total_cents = chosen["total_cents"] if chosen else 0
+        count = chosen["count"] if chosen else 0
+
+    # 环比：只对能算出上一等长周期的选项计算，且只在「全部」类别时显示
     delta = None
-    prev_from, prev_to = previous_period(option)
-    if prev_from and prev_to:
-        try:
-            prev_total = api_get(
-                "/stats/category", params={"from": prev_from, "to": prev_to}
-            ).get("total_cents", 0)
-        except ApiError:
-            prev_total = 0
-        if prev_total:
-            delta = f"{(total_cents - prev_total) / prev_total * 100:+.0f}% 环比"
+    if selected == "全部":
+        prev_from, prev_to = previous_period(option)
+        if prev_from and prev_to:
+            try:
+                prev_total = api_get(
+                    "/stats/category", params={"from": prev_from, "to": prev_to}
+                ).get("total_cents", 0)
+            except ApiError:
+                prev_total = 0
+            if prev_total:
+                delta = f"{(total_cents - prev_total) / prev_total * 100:+.0f}% 环比"
 
     with st.container(border=True):
         col_1, col_2, col_3 = st.columns(3)
-        col_1.metric("总支出", fmt_money(total_cents), delta=delta, delta_color="inverse")
+        col_1.metric(
+            "总支出" if selected == "全部" else f"{selected}支出",
+            fmt_money(total_cents),
+            delta=delta,
+            delta_color="inverse",
+        )
         col_2.metric("笔数", f"{count} 笔")
-        col_3.metric("类别数", f"{len(items)} 类")
+        if selected == "全部":
+            col_3.metric("类别数", f"{len(items)} 类")
+        else:
+            col_3.metric("占全部支出", f"{chosen['ratio']:.0%}" if chosen else "0%")
 
     # 最大类别单独一行说明，避免塞进指标卡被截断
-    if top:
+    if selected == "全部" and top:
         st.caption(
             f"最大类别：**{top['category']}** {fmt_money(top['total_cents'])}"
             f"（占 {top['ratio']:.0%}）"
+        )
+    elif selected != "全部":
+        st.caption(
+            f"当前只看「{selected}」；全部类别合计 {fmt_money(all_total_cents)}，"
+            "下方图表仍显示全部类别并高亮选中项。"
         )
 
     # 本月视图额外带上预算进度，和「预算管理」页呼应
@@ -219,6 +260,14 @@ def render_stats_page() -> None:
             ]
         )
         color_scale = alt.Scale(domain=CATEGORIES, range=CATEGORY_COLORS)
+        # 选中某个类别时把其余类别的图形变淡，保留整体分布
+        opacity = (
+            alt.value(1.0)
+            if selected == "全部"
+            else alt.condition(
+                alt.datum.类别 == selected, alt.value(1.0), alt.value(0.22)
+            )
+        )
         col_bar, col_pie = st.columns(2)
         with col_bar:
             st.altair_chart(
@@ -228,6 +277,7 @@ def render_stats_page() -> None:
                     x=alt.X("类别:N", sort="-y", title=None, axis=alt.Axis(labelAngle=0)),
                     y=alt.Y("金额:Q", title="金额（元）"),
                     color=alt.Color("类别:N", scale=color_scale, legend=None),
+                    opacity=opacity,
                     tooltip=["类别", alt.Tooltip("金额:Q", format=",.2f"), "笔数"],
                 ),
                 width="stretch",
@@ -243,6 +293,7 @@ def render_stats_page() -> None:
                         scale=color_scale,
                         legend=alt.Legend(title="类别", orient="right"),
                     ),
+                    opacity=opacity,
                     tooltip=[
                         "类别",
                         alt.Tooltip("金额:Q", format=",.2f"),
@@ -281,6 +332,8 @@ def render_stats_page() -> None:
             ),
             use_container_width=True,
         )
+        if selected != "全部":
+            st.caption("趋势图是全部类别的月度合计，不随类型筛选变化。")
     else:
         empty_state("📈", "还没有趋势数据", "记几笔账之后，这里会显示最近 6 个月的支出变化")
 
@@ -290,7 +343,12 @@ def render_stats_page() -> None:
     try:
         listing = api_get(
             "/transactions",
-            params={"from": date_from, "to": date_to, "limit": 100},
+            params={
+                "from": date_from,
+                "to": date_to,
+                "category": None if selected == "全部" else selected,
+                "limit": 100,
+            },
         )
     except ApiError as exc:
         st.error(f"读取账单失败：{exc.message}")
@@ -299,7 +357,11 @@ def render_stats_page() -> None:
     records = listing.get("items") or []
     if records:
         st.dataframe(transactions_frame(records), width="stretch", hide_index=True)
-        st.caption(f"共 {listing.get('total', len(records))} 条，当前展示最近 {len(records)} 条。")
+        scope = "全部类别" if selected == "全部" else f"类别「{selected}」"
+        st.caption(
+            f"{scope}：共 {listing.get('total', len(records))} 条，"
+            f"当前展示最近 {len(records)} 条。"
+        )
         st.download_button(
             "⬇️ 导出 CSV",
             export_csv(records),
