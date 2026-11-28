@@ -356,7 +356,7 @@ def render_stats_page() -> None:
                 for day in all_days
             ]
         )
-        st.altair_chart(
+        daily_bars = (
             alt.Chart(daily_frame)
             .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
             .encode(
@@ -370,9 +370,19 @@ def render_stats_page() -> None:
                     alt.datum.今天, alt.value("#4F46E5"), alt.value("#C7D2FE")
                 ),
                 tooltip=["日期", alt.Tooltip("金额:Q", format=",.2f")],
-            ),
-            width="stretch",
+            )
         )
+        # 只在有消费的柱子上标金额，避免 0 值标签挤满横轴
+        daily_labels = (
+            alt.Chart(daily_frame[daily_frame["金额"] > 0])
+            .mark_text(dy=-6, fontSize=10, color="#6B7280")
+            .encode(
+                x=alt.X("日期:N"),
+                y=alt.Y("金额:Q"),
+                text=alt.Text("金额:Q", format=",.0f"),
+            )
+        )
+        st.altair_chart(daily_bars + daily_labels, width="stretch")
         scope = "全部类别" if selected == "全部" else f"「{selected}」"
         st.caption(f"本月{scope}的每日支出，今天的柱子用深色标出。")
     else:
