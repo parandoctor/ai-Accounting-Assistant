@@ -1,8 +1,4 @@
-"""三类抽取任务与规则兜底。
-
-- extract()：一句话 -> 支出字段（ExpenseExtraction）；
-- recognize()：小票/截图 -> 识别字段（ReceiptRecognition）；
-- parse_query()：问句 -> 查询条件（QueryIntent）。
+"""三类抽取任务与规则兜底：一句话记账、小票识别、查账问句解析。
 
 每个任务都优先调用模型，模型不可用或返回不合法时退回规则解析，
 返回值里的 engine 标明这次结果来自 llm 还是 rule。
@@ -11,11 +7,11 @@
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from datetime import datetime, timedelta
+from decimal import Decimal
 
-from app import ai_client
-from app.ai_client import (
+from app.ai import client
+from app.ai.client import (
     APP_TZ,
     amount_cents,
     category,
@@ -24,7 +20,7 @@ from app.ai_client import (
     merchant,
     occurred_at,
 )
-from app.db import Category, ensure_utc
+from app.models import Category
 
 logger = logging.getLogger(__name__)
 
@@ -53,14 +49,15 @@ CATEGORY_KEYWORDS = {
     "商场": Category.SHOPPING, "买": Category.SHOPPING,
 }
 
-# 记账用的本地时区，与前端提交的 +08:00 保持一致。
-_APP_TZ = timezone(timedelta(hours=8))
-
 # 匹配第一个金额数字，允许一两位小数；不区分「元 / 块」等单位。
 _AMOUNT_PATTERN = re.compile(r"(\d+(?:\.\d{1,2})?)")
 
 # 「最近 7 天」这类相对区间。
 _RECENT_DAYS = re.compile(r"最近\s*(\d+)\s*天")
+
+# 「2017 年」「2017年3月」这类绝对时间。
+_YEAR_MONTH = re.compile(r"(?<!\d)(\d{4})\s*年\s*(\d{1,2})\s*月")
+_YEAR = re.compile(r"(?<!\d)(\d{4})\s*年")
 
 
 def amount_cents_from_text(text: str) -> int | None:
@@ -115,7 +112,7 @@ def date_range_from_text(text: str, now: datetime) -> tuple[datetime | None, dat
     返回:
         (起, 止)，都是带时区的 datetime；没有时间词时返回 (None, None) 表示不限时间。
     """
-    local_now = now.astimezone(_APP_TZ)
+    local_now = now.astimezone(APP_TZ)
 
     if "今天" in text:
         start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -136,11 +133,67 @@ def date_range_from_text(text: str, now: datetime) -> tuple[datetime | None, dat
         return start, local_now.replace(
             month=12, day=31, hour=23, minute=59, second=59, microsecond=999999
         )
+    if "去年" in text:
+        start = local_now.replace(
+            year=local_now.year - 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+        return start, start.replace(
+            month=12, day=31, hour=23, minute=59, second=59, microsecond=999999
+        )
+    # 绝对年月要排在整年前面：「2017年3月」两者都命中，取更具体的年月。
+    year_month = _YEAR_MONTH.search(text)
+    if year_month and 1 <= int(year_month.group(2)) <= 12:
+        start = local_now.replace(
+            year=int(year_month.group(1)),
+            month=int(year_month.group(2)),
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        next_month = (start + timedelta(days=32)).replace(day=1)
+        return start, next_month - timedelta(microseconds=1)
+    year = _YEAR.search(text)
+    if year:
+        start = local_now.replace(
+            year=int(year.group(1)), month=1, day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+        return start, start.replace(
+            month=12, day=31, hour=23, minute=59, second=59, microsecond=999999
+        )
     recent = _RECENT_DAYS.search(text)
     if recent:
         start = local_now - timedelta(days=int(recent.group(1)))
         return start, local_now
     return None, None
+
+
+# 问句里没有时间词和类别时，只有这些说法才表示「查全部」；
+# 其余问句视为没解析出条件，由 /query/ask 提示用户换个说法。
+_TOTAL_HINTS = ("总共", "一共", "全部", "合计", "所有", "累计", "总支出", "花了多少")
+
+
+def question_understood(
+    text: str,
+    category: Category | None,
+    date_from: datetime | None,
+    date_to: datetime | None,
+) -> bool:
+    """判断问句是否解析出了可执行的查询条件。
+
+    参数:
+        text: 用户问句。
+        category: 解析出的类别，没有时为 None。
+        date_from / date_to: 解析出的时间区间，没有时为 None。
+
+    返回:
+        True 表示问句要么限定了类别或时间，要么明确在问整体支出；
+        False 表示什么都没解析出来，不能退化成全量汇总。
+    """
+    if category is not None or date_from is not None or date_to is not None:
+        return True
+    return any(word in text for word in _TOTAL_HINTS)
 
 
 def parse_question(text: str, now: datetime) -> dict:
@@ -194,10 +247,10 @@ def extract(text: str) -> ExpenseExtraction:
     返回:
         ExpenseExtraction：未识别字段为 None；engine 为 llm 或 rule。
     """
-    if ai_client.configured():
+    if client.configured():
         try:
-            payload = ai_client.extract_json(
-                ai_client.TASK_TEXT,
+            payload = client.extract_json(
+                client.TASK_TEXT,
                 # 提示词里有 JSON 花括号，str.format 会把它当占位符，这里只做字符串替换。
                 _TEXT_PROMPT.replace(
                     "{now}",
@@ -213,7 +266,7 @@ def extract(text: str) -> ExpenseExtraction:
                 confidence=confidence(payload.get("confidence")),
                 engine="llm",
             )
-        except ai_client.AiUnavailable as exc:
+        except client.AiUnavailable as exc:
             # 模型不可用不影响记账，退回规则解析并在日志里留痕。
             logger.warning("文本抽取退回规则解析：%s", exc)
 
@@ -280,18 +333,18 @@ def recognize(image: bytes, mime: str) -> ReceiptRecognition:
     返回:
         ReceiptRecognition：未识别字段为 None；engine 为 llm 或 none。
     """
-    if not ai_client.vision_configured():
+    if not client.vision_configured():
         return _empty()
 
     try:
-        payload = ai_client.extract_json(
-            ai_client.TASK_RECEIPT,
+        payload = client.extract_json(
+            client.TASK_RECEIPT,
             _RECEIPT_PROMPT,
             "请识别这张消费凭证。",
             image=image,
             mime=mime,
         )
-    except ai_client.AiUnavailable as exc:
+    except client.AiUnavailable as exc:
         logger.warning("小票识别失败，返回空草稿：%s", exc)
         return _empty()
 
@@ -331,6 +384,9 @@ class QueryIntent:
     intent: str
     confidence: float
     engine: str
+    # False 表示问句里既没时间也没类别，且不像在问整体支出；
+    # /query/ask 遇到 False 时给提示，不拿全量数据糊弄用户。
+    understood: bool
 
 
 def _intent(value: object) -> str:
@@ -349,10 +405,10 @@ def parse_query(question: str, now: datetime) -> QueryIntent:
     返回:
         QueryIntent：没有限定条件时 category 与起止时间都为 None。
     """
-    if ai_client.configured():
+    if client.configured():
         try:
-            payload = ai_client.extract_json(
-                ai_client.TASK_QUERY,
+            payload = client.extract_json(
+                client.TASK_QUERY,
                 # 提示词里有 JSON 花括号，str.format 会把它当占位符，这里只做字符串替换。
                 _QUERY_PROMPT.replace(
                     "{now}",
@@ -363,15 +419,17 @@ def parse_query(question: str, now: datetime) -> QueryIntent:
             date_from, date_to = date_range(
                 payload.get("date_from"), payload.get("date_to")
             )
+            parsed_category = category(payload.get("category"))
             return QueryIntent(
-                category=category(payload.get("category")),
+                category=parsed_category,
                 date_from=date_from,
                 date_to=date_to,
                 intent=_intent(payload.get("intent")),
                 confidence=confidence(payload.get("confidence")),
                 engine="llm",
+                understood=question_understood(question, parsed_category, date_from, date_to),
             )
-        except ai_client.AiUnavailable as exc:
+        except client.AiUnavailable as exc:
             logger.warning("查询解析退回规则：%s", exc)
 
     parsed = parse_question(question, now)
@@ -382,4 +440,7 @@ def parse_query(question: str, now: datetime) -> QueryIntent:
         intent=parsed["intent"],
         confidence=parsed["confidence"],
         engine="rule",
+        understood=question_understood(
+            question, parsed["category"], parsed["date_from"], parsed["date_to"]
+        ),
     )

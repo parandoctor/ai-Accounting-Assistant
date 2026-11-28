@@ -13,8 +13,10 @@ from dataclasses import dataclass
 
 from pymysql.connections import Connection
 
-from app import ai_client, ai_tasks, db, dify
-from app.ai_client import AiUnavailable
+from app import operations
+from app.ai import client, dify, tasks
+from app.ai.client import AiUnavailable
+from app.models import ChatSession
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +52,7 @@ class AgentReply:
     conversation_id: str | None
 
 
-def _local_reply(extraction: ai_tasks.ExpenseExtraction) -> str:
+def _local_reply(extraction: tasks.ExpenseExtraction) -> str:
     """把本地单轮解析结果转成一句可读回复。"""
     if extraction.amount_cents:
         category = extraction.category.value if extraction.category else "其他"
@@ -68,7 +70,7 @@ def _history(conn: Connection, session_id: str) -> list[dict[str, str]]:
     返回:
         list[dict]：按时间正序的 {"role", "content"}，最后一条是本次用户输入。
     """
-    rows = db.list_chat_messages(conn, session_id, limit=_HISTORY_LIMIT)
+    rows = operations.list_chat_messages(conn, session_id, limit=_HISTORY_LIMIT)
     return [
         {"role": row["role"], "content": row["content"]}
         for row in rows
@@ -78,15 +80,15 @@ def _history(conn: Connection, session_id: str) -> list[dict[str, str]]:
 
 def _chat_with_model(conn: Connection, session_id: str) -> str:
     """走 OpenAI 兼容接口：把系统提示与历史消息一起发给模型。"""
-    return ai_client.chat(_SYSTEM_PROMPT, _history(conn, session_id))
+    return client.chat(_SYSTEM_PROMPT, _history(conn, session_id))
 
 
-def _chat_with_dify(conn: Connection, session: db.ChatSession, message: str) -> tuple[str, str | None]:
+def _chat_with_dify(conn: Connection, session: ChatSession, message: str) -> tuple[str, str | None]:
     """走 Dify 对话应用，返回回复与最新 conversation_id（新会话时回写）。"""
     result = dify.chat(message, session.conversation_id)
     conversation_id = result["conversation_id"] or session.conversation_id
     if conversation_id and conversation_id != session.conversation_id:
-        db.set_chat_conversation_id(conn, session.session_id, conversation_id)
+        operations.set_chat_conversation_id(conn, session.session_id, conversation_id)
     return result["answer"], conversation_id
 
 
@@ -101,21 +103,21 @@ def chat(conn: Connection, message: str, session_id: str | None = None) -> Agent
     返回:
         AgentReply：会话 id、回复文本、生成方式与 Dify 会话标识。
     """
-    session = db.get_or_create_chat_session(conn, session_id)
-    db.add_chat_message(conn, session.session_id, "user", message)
+    session = operations.get_or_create_chat_session(conn, session_id)
+    operations.add_chat_message(conn, session.session_id, "user", message)
 
     conversation_id = session.conversation_id
-    if not ai_client.chat_configured():
-        reply = _local_reply(ai_tasks.extract(message))
+    if not client.chat_configured():
+        reply = _local_reply(tasks.extract(message))
         engine = "local"
-    elif ai_client.provider() == "dify":
+    elif client.provider() == "dify":
         try:
             reply, conversation_id = _chat_with_dify(conn, session, message)
             engine = "dify"
         except AiUnavailable as exc:
             # Dify 临时不可用时退回本地解析，保证对话不中断。
             logger.warning("Dify 对话失败，退回本地解析：%s", exc)
-            reply = _local_reply(ai_tasks.extract(message))
+            reply = _local_reply(tasks.extract(message))
             engine = "local"
     else:
         try:
@@ -123,10 +125,10 @@ def chat(conn: Connection, message: str, session_id: str | None = None) -> Agent
             engine = "llm"
         except AiUnavailable as exc:
             logger.warning("模型对话失败，退回本地解析：%s", exc)
-            reply = _local_reply(ai_tasks.extract(message))
+            reply = _local_reply(tasks.extract(message))
             engine = "local"
 
-    db.add_chat_message(conn, session.session_id, "assistant", reply)
+    operations.add_chat_message(conn, session.session_id, "assistant", reply)
     return AgentReply(
         session_id=session.session_id,
         reply=reply,

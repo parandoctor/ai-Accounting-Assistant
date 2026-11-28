@@ -9,7 +9,7 @@
 对话型应用（chatflow / agent）走 /v1/chat-messages，由 Dify 维护多轮上下文和工具调用；
 后端只保存 conversation_id 与消息记录。
 
-工作流输出约定：outputs.result 为 JSON 字符串或 JSON 对象，字段与 api.py 的
+工作流输出约定：outputs.result 为 JSON 字符串或 JSON 对象，字段与 app.schemas 的
 TransactionDraft / QueryIntent 对齐。
 """
 
@@ -18,7 +18,7 @@ import os
 
 import httpx
 
-from app.ai_client import AiUnavailable, BadRequest, post_json, post_multipart
+from app.ai.client import AiUnavailable, BadRequest, post_json, post_multipart
 
 # 任务名 → 工作流名环境变量；未配置时回退到 DIFY_WORKFLOW_NAME。
 _WORKFLOW_ENV = {

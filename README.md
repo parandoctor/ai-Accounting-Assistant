@@ -34,16 +34,33 @@
 
 ```text
 ai-Accounting-Assistant/
-├── backend/                        # 后端服务，业务代码 8 个文件
+├── backend/                        # 后端服务：接口按业务分文件，基础件集中
 │   ├── app/
-│   │   ├── main.py                 # 入口：建库建表、CORS、挂路由、/health 等基础接口
-│   │   ├── api.py                  # HTTP 层：请求/响应模型与六个路由
-│   │   ├── error.py                # 统一错误结构 {code, message, detail} 与异常处理器
-│   │   ├── db.py                   # 存储层：领域枚举、MySQL 连接、建表与全部 SQL
-│   │   ├── ai_client.py            # 模型调用：传输重试 + OpenAI 兼容接口 + 字段清洗
-│   │   ├── dify.py                 # Dify 接入：任务工作流、文件上传、对话应用
-│   │   ├── ai_tasks.py             # 抽取任务：一句话记账、查账解析、小票识别、规则兜底
-│   │   └── ai_chat.py              # 多轮对话：Dify / 兼容接口 / 本地兜底三路降级
+│   │   ├── main.py                 # 入口：建库建表、CORS、异常处理器、挂路由
+│   │   ├── api/
+│   │   │   ├── main.py             # 路由汇总，把各业务 router 挂到 api_router
+│   │   │   ├── dependencies.py     # 路由依赖：请求级数据库连接
+│   │   │   └── routes/             # 一个业务一个文件
+│   │   │       ├── transactions.py # 记账：解析、保存、列表、删除
+│   │   │       ├── receipts.py     # 小票识别
+│   │   │       ├── query.py        # 自然语言查账
+│   │   │       ├── stats.py        # 分类统计
+│   │   │       ├── budgets.py      # 月度预算
+│   │   │       ├── agent.py        # 智能助手
+│   │   │       └── meta.py         # 类别、健康检查、AI 状态
+│   │   ├── core/
+│   │   │   ├── config.py           # 配置：数据库参数、脚本路径、版本号
+│   │   │   ├── database.py         # 连接、建库建表与补列
+│   │   │   └── errors.py           # 统一错误结构 {code, message, detail}
+│   │   ├── ai/
+│   │   │   ├── client.py           # 模型调用：传输重试 + 兼容接口 + 字段清洗
+│   │   │   ├── dify.py             # Dify 接入：任务工作流、文件上传、对话应用
+│   │   │   ├── tasks.py            # 抽取任务：一句话记账、查账解析、小票识别、规则兜底
+│   │   │   └── chat.py             # 多轮对话：Dify / 兼容接口 / 本地兜底三路降级
+│   │   ├── models.py               # 类别与来源枚举、数据库行结构
+│   │   ├── schemas.py              # 接口请求与响应模型
+│   │   ├── operations.py           # 全部 SQL 与数据库行映射
+│   │   └── utils.py                # 时区校验、金额元分换算
 │   ├── schema.sql                  # 建表脚本，应用启动时读取执行
 │   ├── sample.csv                  # 示例流水，可用 MySQL 客户端导入演示
 │   ├── .env.example                # 环境变量示例

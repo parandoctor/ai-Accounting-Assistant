@@ -2,11 +2,11 @@
 
 - 传输层：统一超时、重试与错误归类，调用方只需要捕获 AiUnavailable；
 - OpenAI 兼容接口：文本抽取、多轮对话与图片识别都走 /chat/completions；
-- Dify 接入见 app.dify；本模块只保留两者共用的传输层与 OpenAI 兼容调用；
+- Dify 接入见 app.ai.dify；本模块只保留两者共用的传输层与 OpenAI 兼容调用；
 - 清洗函数：把模型返回的 JSON 收敛成本系统认识的类型（金额、时间、类别、商户）。
 
 配置全在环境变量里，见 backend/.env.example；未配置密钥时 configured() 为 False，
-调用方直接走规则兜底，接口本身不会失败。
+调用方走规则兜底，接口本身不会失败。
 """
 
 import base64
@@ -15,20 +15,16 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
 
 import httpx
-from dotenv import load_dotenv
 
-from app.db import Category, ensure_utc
+from app.core import config as _config  # noqa: F401  触发 backend/.env 加载
+from app.models import Category
+from app.utils import APP_TZ, ensure_utc
 
 logger = logging.getLogger(__name__)
-
-# 先读 backend/.env，保证进程内任何入口拿到的都是同一份配置。
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
-
 
 # 重试退避基数（秒），第 n 次重试等待 RETRY_BACKOFF * n。
 RETRY_BACKOFF = 0.8
@@ -413,8 +409,7 @@ def extract_json(
     return result
 
 
-# 记账用的本地时区；模型给出不带时区的时间时按它理解。
-APP_TZ = timezone(timedelta(hours=8))
+# 记账用的本地时区；模型给出不带时区的时间时按它理解。定义在 utils，全项目共用一份。
 
 # 商户名与数据库 varchar(30) 对齐。
 MERCHANT_MAX = 30
@@ -481,4 +476,4 @@ def date_range(
 
 
 # dify.py 复用本模块的传输与错误类型；放在末尾导入以避开循环依赖。
-from app import dify  # noqa: E402
+from app.ai import dify  # noqa: E402
