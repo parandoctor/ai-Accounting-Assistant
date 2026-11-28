@@ -1,4 +1,4 @@
-"""页面：多轮对话助手（后端代理 Dify / 本地解析）。"""
+"""页面：多轮对话助手（上下文由后端保存，未配置模型时本地解析兜底）。"""
 
 from __future__ import annotations
 
@@ -29,10 +29,10 @@ def render_assistant_page() -> None:
     """页面 5：多轮对话。
 
     历史消息以后端为准，每次渲染都从 /agent/sessions/{id} 拉取，
-    这样刷新页面、换设备都能接着聊；Dify 未配置时后端退化为本地单轮解析。
+    这样刷新页面、换设备都能接着聊；未配置模型时后端退化为本地单轮解析。
     """
     st.header("💬 智能助手")
-    st.caption("多轮对话：上下文由后端交给 Dify 维护；未配置 Dify 时退回本地单轮解析。")
+    st.caption("多轮对话：上下文由后端保存，未配置模型时退回本地单轮解析。")
 
     session_id = st.session_state.get("chat_session_id")
     data = None
@@ -45,13 +45,12 @@ def render_assistant_page() -> None:
             session_id = None
 
     messages = (data or {}).get("messages") or []
-    connected = bool((data or {}).get("conversation_id"))
 
     if messages:
         for item in messages:
             with st.chat_message(item["role"]):
                 st.markdown(item["content"])
-        st.caption("Dify 对话已接通" if connected else "本地解析模式（Dify 对话应用未配置）")
+        st.caption("对话记录由后端保存，可以接着往下问")
     else:
         st.info("先打个招呼，或者点下面的示例开始。")
         cols = st.columns(len(CHAT_STARTERS))
