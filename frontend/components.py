@@ -67,6 +67,18 @@ div[data-testid="stMetric"] {
   font-weight: 500;
 }
 
+/* 记账页金额输入：放大成「主角」，数字右对齐 */
+div[data-testid="stNumberInput"]:has(input[aria-label="金额（元）"]) input {
+  font-size: 2rem;
+  font-weight: 650;
+  height: 3.4rem;
+  text-align: right;
+  color: #1F2430;
+}
+div[data-testid="stNumberInput"]:has(input[aria-label="金额（元）"]) button {
+  height: 3.4rem;
+}
+
 /* 进度条与提示块圆角，和卡片保持一致 */
 div[data-testid="stProgress"] > div > div > div {border-radius: 6px;}
 div[data-testid="stAlert"] {border-radius: 12px;}
