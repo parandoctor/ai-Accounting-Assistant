@@ -145,6 +145,11 @@ def render_delete_transaction(items: list[dict]) -> None:
         st.rerun()
 
 
+def _use_month() -> None:
+    """回调：改动月份时把时间范围切到「指定月份」。"""
+    st.session_state["stats_range"] = "指定月份"
+
+
 def _clear_pick_day() -> None:
     """回调：清空「按天查看」，恢复按时间范围筛选。"""
     st.session_state["stats_pick_day"] = None
@@ -155,24 +160,27 @@ def render_stats_page() -> None:
     st.header("📊 账单与统计")
     st.caption("按时间范围查看消费构成与明细，可以在这里删除账单。")
 
-    col_range, col_start, col_end = st.columns([2, 1, 1])
+    col_range, col_month = st.columns([3, 2])
     with col_range:
         option = st.selectbox("时间范围", RANGE_OPTIONS, key="stats_range")
+    with col_month:
+        month_choice = st.selectbox(
+            "月份",
+            month_options(24),
+            key="stats_month",
+            on_change=_use_month,
+            help="选一个月份会自动把时间范围切到「指定月份」",
+        )
     custom_start, custom_end = date.today().replace(day=1), date.today()
     if option == "自定义":
+        col_start, col_end = st.columns(2)
         with col_start:
             custom_start = st.date_input("开始日期", value=custom_start, key="stats_from")
         with col_end:
             custom_end = st.date_input("结束日期", value=custom_end, key="stats_to")
 
-    month_choice = None
-    if option == "指定月份":
-        month_choice = st.selectbox(
-            "选择月份",
-            month_options(24),
-            key="stats_month",
-            help="可选最近 24 个月，环比会与它的上一个月比较",
-        )
+    if option != "指定月份":
+        month_choice = None
 
     date_from, date_to = resolve_range(option, custom_start, custom_end, month_choice)
 
@@ -205,7 +213,6 @@ def render_stats_page() -> None:
     total_cents = stats.get("total_cents", 0)
     all_total_cents = total_cents
     items = stats.get("items") or []
-    top = max(items, key=lambda i: i["total_cents"]) if items else None
     count = sum(item["count"] for item in items)
 
     # 选中某个类别时，指标与明细都只看这一类；图表保留全量分布并高亮
@@ -232,41 +239,31 @@ def render_stats_page() -> None:
                 change_cents = total_cents - prev_total
                 delta = f"{change_cents / prev_total * 100:+.0f}%"
 
-    with st.container(border=True):
-        cols = st.columns(4 if delta else 3)
-        cols[0].metric(
-            "总支出" if selected == "全部" else f"{selected}支出",
-            fmt_money(total_cents),
-            delta=delta,
-            delta_color="inverse",
-        )
-        cols[1].metric("笔数", f"{count} 笔")
-        if selected == "全部":
-            cols[2].metric("类别数", f"{len(items)} 类")
-        else:
-            cols[2].metric("占全部支出", f"{chosen['ratio']:.0%}" if chosen else "0%")
-        if delta and change_cents is not None:
-            sign = "↑" if change_cents > 0 else "↓"
-            cols[3].metric(
-                "较上期",
-                f"{sign} {fmt_money(abs(change_cents))}",
-                help=f"上期支出 {fmt_money(prev_total)}",
-            )
-
-    # 最大类别单独一行说明，避免塞进指标卡被截断
-    if selected == "全部" and top:
-        st.caption(
-            f"最大类别：**{top['category']}** {fmt_money(top['total_cents'])}"
-            f"（占 {top['ratio']:.0%}）"
-        )
-    elif selected != "全部":
-        st.caption(
-            f"当前只看「{selected}」；全部类别合计 {fmt_money(all_total_cents)}，"
-            "下方图表仍显示全部类别并高亮选中项。"
-        )
-
+    # ---------- 头部：共支出 + 环比（记账本风格） ----------
+    label = "共支出" if selected == "全部" else f"「{selected}」支出"
+    sub_parts = [f"{count} 笔", f"{len(items)} 类"]
+    if delta and change_cents is not None:
+        arrow = "↑" if change_cents > 0 else "↓"
+        sub_parts.insert(0, f"较上期 {arrow} ¥{abs(change_cents) / 100:,.2f}（{delta}）")
+    st.markdown(
+        f"""
+        <div style="background:linear-gradient(135deg,#4F46E5,#7C6BF0);border-radius:18px;
+                    padding:22px 26px;color:#fff;box-shadow:0 8px 20px rgba(79,70,229,.22);">
+          <div style="font-size:14px;opacity:.85;">{label}</div>
+          <div style="font-size:42px;font-weight:700;line-height:1.15;margin-top:2px;">
+            {fmt_money(total_cents)}
+          </div>
+          <div style="font-size:13px;opacity:.9;margin-top:10px;">{" · ".join(sub_parts)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     if delta and prev_from and prev_to:
         st.caption(f"环比基期：{fmt_local(prev_from)} ~ {fmt_local(prev_to)}")
+    elif selected != "全部":
+        st.caption(
+            f"全部类别合计 {fmt_money(all_total_cents)}，下方构成仍显示全部类别并高亮选中项。"
+        )
 
     # 本月视图额外带上预算进度，和「预算管理」页呼应
     if option == "本月":
@@ -294,6 +291,7 @@ def render_stats_page() -> None:
                     ),
                 )
 
+    st.subheader("🍩 支出构成")
     if items:
         frame = pd.DataFrame(
             [
@@ -302,6 +300,7 @@ def render_stats_page() -> None:
                     "金额": to_yuan(item["total_cents"]),
                     "占比": item["ratio"],
                     "笔数": item["count"],
+                    "标签": f"{item['category']} {item['ratio']:.0%}",
                 }
                 for item in items
             ]
@@ -315,39 +314,66 @@ def render_stats_page() -> None:
                 alt.datum.类别 == selected, alt.value(1.0), alt.value(0.22)
             )
         )
-        col_bar, col_pie = st.columns(2)
-        with col_bar:
-            st.altair_chart(
-                alt.Chart(frame)
-                .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
-                .encode(
-                    x=alt.X("类别:N", sort="-y", title=None, axis=alt.Axis(labelAngle=0)),
-                    y=alt.Y("金额:Q", title="金额（元）"),
-                    color=alt.Color("类别:N", scale=color_scale, legend=None),
-                    opacity=opacity,
-                    tooltip=["类别", alt.Tooltip("金额:Q", format=",.2f"), "笔数"],
-                ),
-                width="stretch",
+        donut = (
+            alt.Chart(frame)
+            .mark_arc(innerRadius=88, outerRadius=145)
+            .encode(
+                theta=alt.Theta("金额:Q"),
+                color=alt.Color("类别:N", scale=color_scale, legend=None),
+                opacity=opacity,
+                tooltip=[
+                    "类别",
+                    alt.Tooltip("金额:Q", format=",.2f"),
+                    alt.Tooltip("占比:Q", format=".1%"),
+                ],
             )
-        with col_pie:
-            st.altair_chart(
-                alt.Chart(frame)
-                .mark_arc(innerRadius=50)
-                .encode(
-                    theta=alt.Theta("金额:Q"),
-                    color=alt.Color(
-                        "类别:N",
-                        scale=color_scale,
-                        legend=alt.Legend(title="类别", orient="right"),
-                    ),
-                    opacity=opacity,
-                    tooltip=[
-                        "类别",
-                        alt.Tooltip("金额:Q", format=",.2f"),
-                        alt.Tooltip("占比:Q", format=".1%"),
-                    ],
-                ),
-                width="stretch",
+        )
+        # 占比过小的类别不标文字，避免标签重叠
+        ring_labels = (
+            alt.Chart(frame[frame["占比"] >= 0.07])
+            .mark_text(radius=170, fontSize=11, color="#4B5563")
+            .encode(theta=alt.Theta("金额:Q"), text=alt.Text("标签:N"))
+        )
+        st.altair_chart(
+            (donut + ring_labels).properties(height=420), width="stretch"
+        )
+        st.caption("占比小于 4% 的类别不标文字，鼠标悬停可看具体金额。")
+
+        # 分类明细列表：图标 + 名称 + 进度条 + 金额（记账本风格）
+        st.markdown("##### 分类明细")
+        max_cents = max(item["total_cents"] for item in items) or 1
+        for item in items:
+            cat = item["category"]
+            color = (
+                CATEGORY_COLORS[CATEGORIES.index(cat)]
+                if cat in CATEGORIES
+                else "#9CA3AF"
+            )
+            icon = CATEGORY_ICONS.get(cat, "📦")
+            width = max(item["total_cents"] / max_cents * 100, 2.0)
+            st.markdown(
+                f"""
+                <div style="display:flex;align-items:center;gap:12px;padding:9px 0;
+                            border-bottom:1px solid #EEF0F6;">
+                  <div style="width:32px;height:32px;border-radius:50%;background:{color}1F;
+                              display:flex;align-items:center;justify-content:center;
+                              font-size:16px;">{icon}</div>
+                  <div style="flex:1;">
+                    <div style="display:flex;justify-content:space-between;font-size:13px;
+                                color:#1F2430;">
+                      <span>{cat}</span>
+                      <span>{fmt_money(item['total_cents'])}
+                        <span style="color:#8A90A2;margin-left:6px;">{item['ratio']:.1%}</span>
+                      </span>
+                    </div>
+                    <div style="height:6px;background:#EEF1FA;border-radius:3px;margin-top:6px;">
+                      <div style="width:{width:.1f}%;height:100%;background:{color};
+                                  border-radius:3px;"></div>
+                    </div>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
     else:
         empty_state("📭", "这个时间范围没有账单", "换个时间范围试试，或先去记一笔")
