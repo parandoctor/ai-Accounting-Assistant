@@ -43,6 +43,9 @@ def _request(method: str, path: str, **kwargs):
     if resp.status_code >= 400:
         # 后端错误结构统一为 {code, message, detail}
         message = (body or {}).get("message") if isinstance(body, dict) else None
+        if not message and resp.status_code >= 500:
+            # 5xx 常常没有响应体（如金额超出数据库范围），给一句能看懂的话
+            message = f"服务端处理失败（HTTP {resp.status_code}），请检查输入后重试"
         raise ApiError(resp.status_code, message or resp.text[:200] or "请求失败")
     return body
 

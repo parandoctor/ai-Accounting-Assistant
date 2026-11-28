@@ -8,8 +8,18 @@ import streamlit as st
 
 APP_CSS = """
 <style>
-/* 顶部工具栏与页脚：隐藏 Deploy、GitHub 等与演示无关的入口 */
-[data-testid="stToolbar"] {display: none;}
+/* 顶部工具栏：只隐藏 Deploy / 主菜单 / 运行状态，保留「展开侧边栏」按钮 */
+[data-testid="stToolbar"] {background: transparent;}
+[data-testid="stToolbar"] [data-testid="stBaseButton-header"],
+[data-testid="stToolbar"] [data-testid="stMainMenuButton"],
+[data-testid="stToolbar"] [data-testid="stStatusWidget"] {display: none;}
+/* 侧边栏折叠后，展开按钮不能跟着被藏掉 */
+[data-testid="stExpandSidebarButton"],
+[data-testid="stSidebarCollapsedControl"] {
+  display: inline-flex !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
 footer {visibility: hidden;}
 
 /* 内容区留白：宽屏下不让正文铺满，读起来更舒服 */
