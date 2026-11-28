@@ -1,12 +1,18 @@
 """记账助手后端。
 
-文件分工：
-    main.py      应用入口：建库建表、CORS、挂路由、基础接口
-    api.py       HTTP 层：Pydantic 模型与六个路由
-    error.py     统一错误结构、异常处理器
-    db.py        存储层：领域枚举、MySQL 连接、建表与全部 SQL
-    ai_client.py 模型调用：传输重试 + OpenAI 兼容接口 + 字段清洗
-    dify.py      Dify 接入：任务工作流、文件上传、对话应用
-    ai_tasks.py  抽取任务：一句话记账、查账解析、小票识别、规则兜底
-    ai_chat.py   多轮对话：Dify / 兼容接口 / 本地兜底三路降级
+目录分工：
+    main.py                   应用入口：建表、CORS、挂路由
+    api/routes/               各业务接口，一个业务一个文件
+    api/dependencies.py       路由依赖：请求级数据库连接
+    core/config.py            配置：数据库参数、脚本路径、版本号
+    core/database.py          连接、建库建表与补列
+    core/errors.py            统一错误结构与异常处理器
+    models.py                 类别与来源枚举、数据库行结构
+    schemas.py                接口请求与响应模型
+    operations.py             全部 SQL 与行映射
+    utils.py                  时区校验、金额元分换算
+    ai/client.py              模型调用与输出清洗
+    ai/dify.py                Dify 工作流与对话应用
+    ai/tasks.py               一句话记账、小票识别、查账解析
+    ai/chat.py                多轮对话三路降级
 """

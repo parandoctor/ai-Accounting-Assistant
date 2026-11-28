@@ -2,10 +2,9 @@
 
 启动顺序：
 1. 导入本模块时创建 app，注册 OpenAPI 元数据；
-2. lifespan 调用 db.init_db() 建库建表；
+2. lifespan 调用 init_db() 建库建表；
 3. 注册 CORS 与统一异常处理器；
-4. 挂载记账、查账、小票、统计、预算、智能助手六个路由；
-5. 直接定义 /health、/categories、/ai/status 三个基础接口。
+4. 挂载 api_router，各业务路由见 app/api/routes/。
 """
 
 from collections.abc import AsyncIterator
@@ -14,32 +13,22 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app import ai_client, db
-from app.error import register_error_handlers
-from app.api import (
-    AiStatusResponse,
-    CategoryOption,
-    Category,
-    HealthResponse,
-    agent_router,
-    budgets_router,
-    query_router,
-    receipts_router,
-    stats_router,
-    transactions_router,
-)
+from app.api.main import api_router
+from app.core.config import API_VERSION
+from app.core.database import init_db
+from app.core.errors import register_error_handlers
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """应用启动时建库建表；已存在的表和数据都不动。"""
-    db.init_db()
+    init_db()
     yield
 
 
 app = FastAPI(
     title="记账助手 API",
-    version="0.1.0",
+    version=API_VERSION,
     description=(
         "个人记账与消费分析接口。\n\n"
         "## 接口约定\n"
@@ -78,45 +67,4 @@ app.add_middleware(
 )
 
 register_error_handlers(app)
-app.include_router(transactions_router)
-app.include_router(query_router)
-app.include_router(receipts_router)
-app.include_router(stats_router)
-app.include_router(budgets_router)
-app.include_router(agent_router)
-
-
-@app.get("/health", tags=["运维"], summary="健康检查", response_model=HealthResponse)
-def health() -> HealthResponse:
-    """返回服务状态与版本号，用于部署探活。"""
-    return HealthResponse(status="ok", version=app.version)
-
-
-@app.get(
-    "/ai/status",
-    tags=["运维"],
-    summary="大模型接入状态",
-    response_model=AiStatusResponse,
-)
-def ai_status() -> AiStatusResponse:
-    """返回当前模型配置，供前端显示「AI 已接入 / 规则模式」。"""
-    return AiStatusResponse(
-        configured=ai_client.configured(),
-        provider=ai_client.provider(),
-        model=ai_client.model_name(),
-        vision_model=ai_client.vision_model_name(),
-        vision_configured=ai_client.vision_configured(),
-        missing_config=ai_client.missing_config(),
-        fallback="规则解析（关键词 + 正则）",
-    )
-
-
-@app.get(
-    "/categories",
-    tags=["元数据"],
-    summary="列出所有消费类别",
-    response_model=list[CategoryOption],
-)
-def list_categories() -> list[CategoryOption]:
-    """返回 Category 枚举的全部取值，供前端下拉框使用。"""
-    return [CategoryOption(value=category, label=category.value) for category in Category]
+app.include_router(api_router)

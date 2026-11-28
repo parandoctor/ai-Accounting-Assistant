@@ -8,10 +8,11 @@
 - message：面向用户的文案；
 - detail：附加上下文，没有内容时为 {}。
 
-ApiError 由业务代码主动抛出；Pydantic 校验失败和框架层 HTTPException
-分别由 register_error_handlers() 中注册的处理器转换。
+ApiError 由业务代码主动抛出；Pydantic 校验失败、框架层 HTTPException 和
+数据库异常分别由 register_error_handlers() 中注册的处理器转换。
 """
 
+import logging
 from typing import Any
 
 from fastapi import FastAPI, Request, status
@@ -19,7 +20,10 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from pymysql import DataError, MySQLError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+logger = logging.getLogger(__name__)
 
 # 框架层 HTTPException 只有状态码，这里补业务 code 和中文文案；
 # 未列出的状态码回退到 HTTP_ERROR + exc.detail。
@@ -48,7 +52,7 @@ class ErrorResponse(BaseModel):
 
 
 # APIRouter 的 responses 参数使用：把 FastAPI 默认的 422 HTTPValidationError
-# 替换成 ErrorResponse。api/transactions.py、api/receipts.py、api/stats.py 都引用它。
+# 替换成 ErrorResponse。app/api/routes/ 下的各业务路由都引用它。
 VALIDATION_ERROR_RESPONSES = {
     422: {
         "model": ErrorResponse,
@@ -60,7 +64,7 @@ VALIDATION_ERROR_RESPONSES = {
 class ApiError(Exception):
     """业务代码主动抛出的异常。
 
-    api/*.py 在业务校验失败时 raise；register_error_handlers() 注册的
+    app/api/routes/ 下的路由在业务校验失败时 raise；register_error_handlers() 注册的
     _api_error 会读取实例上的 code / message / status_code / detail，
     生成 ErrorResponse 后返回。
     """
@@ -88,11 +92,13 @@ class ApiError(Exception):
 
 
 def register_error_handlers(app: FastAPI) -> None:
-    """把三类异常统一注册到 FastAPI 应用。
+    """把五类异常统一注册到 FastAPI 应用。
 
     - ApiError -> _api_error：使用异常实例自带的 code/message/status_code/detail；
     - RequestValidationError -> _validation_error：固定 422 + INVALID_REQUEST；
-    - StarletteHTTPException -> _http_error：按 _HTTP_ERROR_CODES 映射 404/405 等。
+    - StarletteHTTPException -> _http_error：按 _HTTP_ERROR_CODES 映射 404/405 等；
+    - DataError -> _data_error：字段超范围转 400，兜住写库前的漏网数据；
+    - MySQLError -> _db_error：其余数据库错误统一 503，不把驱动堆栈吐给前端。
     """
 
     @app.exception_handler(ApiError)
@@ -137,4 +143,33 @@ def register_error_handlers(app: FastAPI) -> None:
             status_code=exc.status_code,
             content=body.model_dump(),
             headers=exc.headers,
+        )
+
+    @app.exception_handler(DataError)
+    async def _data_error(_: Request, exc: DataError) -> JSONResponse:
+        """数据库字段超范围（例如金额溢出 decimal(10,2)）转成 400。
+
+        这里只回业务文案，不回 SQL 细节，避免把表结构暴露给调用方。
+        """
+        logger.warning("数据库字段超范围：%s", exc)
+        body = ErrorResponse(
+            code="DATA_OUT_OF_RANGE",
+            message="数据超出允许范围，请检查金额或时间",
+        )
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=body.model_dump(),
+        )
+
+    @app.exception_handler(MySQLError)
+    async def _db_error(_: Request, exc: MySQLError) -> JSONResponse:
+        """其余数据库错误统一 503，调用方可以按 code 提示稍后重试。"""
+        logger.error("数据库操作失败：%s", exc)
+        body = ErrorResponse(
+            code="DATABASE_UNAVAILABLE",
+            message="数据库暂不可用，请稍后重试",
+        )
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=body.model_dump(),
         )
